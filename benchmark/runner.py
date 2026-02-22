@@ -109,9 +109,9 @@ def run_load(
     elapsed = run_end - run_start
     actual_rps = total_inserted_final / elapsed if elapsed > 0 else 0
     logger.info(
-        "Run finished: %d rows in %.2fs (%.1f rows/sec, target %d)",
+        "Run finished: %d rows inserted in %.2fs (%.1f rows/sec, target %d)",
         total_inserted_final, elapsed, actual_rps, target_rps,
     )
     print(f"Database: {database}")
-    print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows: {total_inserted_final}")
+    print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final}")
     print(f"Actual rate: {actual_rps:.1f} rows/sec (target {target_rps})")

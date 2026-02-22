@@ -21,9 +21,11 @@ Standard vs Premium disks (To be tested)
 top -b -p 1 -d 1 | grep clickhouse-serv
 python main.py --database clickhouse --duration 10 --batch-size 2 --workers 20 --rows-per-second 10 --queries-per-record 2 --query-delay 100
 
+python main.py --database postgres --duration 60 --batch-size 2 --workers 20 --rows-per-second 100 --queries-per-record 2
+
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
-export TAG=v0.0.9
+export TAG=v0.0.11
 docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 

@@ -88,7 +88,6 @@ def init_schema(conn) -> None:
         cur.execute("""
             DROP TABLE IF EXISTS hl7_messages;
             CREATE TABLE hl7_messages (
-                id BIGSERIAL PRIMARY KEY,
                 fhir_id TEXT,
                 rx_patient_id TEXT,
                 source TEXT,
@@ -100,7 +99,7 @@ def init_schema(conn) -> None:
                 load_date TEXT,
                 checksum TEXT,
                 patient_id TEXT,
-                medical_record_number TEXT NOT NULL,
+                medical_record_number TEXT NOT NULL PRIMARY KEY,
                 name_prefix TEXT,
                 last_name TEXT,
                 first_name TEXT,
@@ -120,26 +119,31 @@ def init_schema(conn) -> None:
                 is_pregnant TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_hl7_patient_id ON hl7_messages(patient_id);
-            CREATE INDEX IF NOT EXISTS idx_hl7_medical_record_number ON hl7_messages(medical_record_number);
         """)
     conn.commit()
     logger.info("Table hl7_messages created (PostgreSQL)")
 
 
 def insert_batch(conn, rows: list[tuple[str, str, str]]) -> int:
-    """Insert batch of (patient_id, message_type, json_message) by mapping to hl7_messages columns."""
+    """Upsert batch of (patient_id, message_type, json_message); overwrites row if medical_record_number exists."""
     if not rows:
         return 0
     mapped = [_row_from_producer_tuple(r) for r in rows]
     cols = ", ".join(_HL7_COLUMNS)
-    placeholders = ", ".join(["%s"] * len(_HL7_COLUMNS))
+    one_row = "(" + ", ".join(["%s"] * len(_HL7_COLUMNS)) + ")"
+    values_placeholders = ", ".join([one_row] * len(mapped))
+    update_cols = [c for c in _HL7_COLUMNS if c != "medical_record_number"]
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+    sql = (
+        f"INSERT INTO hl7_messages ({cols}) VALUES {values_placeholders} "
+        f"ON CONFLICT (medical_record_number) DO UPDATE SET {set_clause}"
+    )
+    flat_values = [x for row in mapped for x in row]
     with conn.cursor() as cur:
-        cur.executemany(
-            f"INSERT INTO hl7_messages ({cols}) VALUES ({placeholders})",
-            mapped,
-        )
+        cur.execute(sql, flat_values)
+        n = cur.rowcount
     conn.commit()
-    return len(rows)
+    return n
 
 
 def query_by_primary_key(conn, medical_record_number: str) -> list:

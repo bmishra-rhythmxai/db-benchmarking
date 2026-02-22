@@ -41,8 +41,8 @@ def init_schema(client) -> None:
     cluster = CLICKHOUSE_CLUSTER
     client.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME} ON CLUSTER '{cluster}'")
     # Drop distributed table first, then local table (both on cluster)
-    client.execute(f"DROP TABLE IF EXISTS {DB_NAME}.hl7_messages ON CLUSTER '{cluster}'")
-    client.execute(f"DROP TABLE IF EXISTS {DB_NAME}.hl7_messages_local ON CLUSTER '{cluster}'")
+    # client.execute(f"DROP TABLE IF EXISTS {DB_NAME}.hl7_messages ON CLUSTER '{cluster}'")
+    # client.execute(f"DROP TABLE IF EXISTS {DB_NAME}.hl7_messages_local ON CLUSTER '{cluster}'")
     # Local table: ReplicatedReplacingMergeTree with storage policy (tiered storage defined on server).
     policy = CLICKHOUSE_STORAGE_POLICY
     client.execute(f"""
@@ -178,11 +178,11 @@ def insert_batch(client, rows: list[tuple[str, str, str]]) -> int:
     client.execute(
         f"INSERT INTO {DB_NAME}.hl7_messages ({cols}) VALUES",
         mapped,
-        settings={
-            "insert_quorum": 2,
-            "insert_quorum_parallel": True,
-            "async_insert": 0,  # sync insert: wait for write to complete
-        },
+        # settings={
+        #     "insert_quorum": 2,
+        #     "insert_quorum_parallel": True,
+        #     "async_insert": 0,  # sync insert: wait for write to complete
+        # },
     )
     return len(rows)
 
@@ -192,6 +192,6 @@ def query_by_primary_key(client, medical_record_number: str) -> list:
     result = client.execute(
         f"SELECT * FROM {DB_NAME}.hl7_messages FINAL WHERE MEDICAL_RECORD_NUMBER = %(mrn)s",
         {"mrn": medical_record_number},
-        settings={"select_sequential_consistency": 1},
+        # settings={"select_sequential_consistency": 1},
     )
     return list(result) if result else []
