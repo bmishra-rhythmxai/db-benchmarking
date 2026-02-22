@@ -1,0 +1,64 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: benchmark-postgres
+    environment:
+      POSTGRES_USER: benchmark
+      POSTGRES_PASSWORD: benchmark
+      POSTGRES_DB: benchmark
+    ports:
+      - "5432:5432"
+    cpus: "2"
+    mem_limit: 2g
+    mem_reservation: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U benchmark -d benchmark"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: benchmark-clickhouse
+    environment:
+      CLICKHOUSE_USER: benchmark
+      CLICKHOUSE_PASSWORD: benchmark
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    # Disable system log tables (query_log, metric_log, etc.) to reduce I/O and background activity
+    volumes:
+      - ./clickhouse-config.d:/etc/clickhouse-server/config.d
+    # Required for NUMA/memory policy (avoids "get_mempolicy: Operation not permitted")
+    cap_add:
+      - SYS_NICE
+      - IPC_LOCK
+    ports:
+      - "8123:8123"   # HTTP
+      # - "9000:9000"   # Native
+    cpus: "2"
+    mem_limit: 4g
+    mem_reservation: 2g
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # Use native client (port 9000 inside container); HTTP (8123) may not be ready or can refuse in some setups
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "benchmark", "--password", "benchmark", "--query", "SELECT 1"]
+      start_period: 15s
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  load-runner:
+    build: .
+    container_name: benchmark-load-runner
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    # Keep running so you can exec in and run the driver; or override with run:
+    #   docker compose run --rm load-runner python main.py --database postgres --duration 60
+    command: sleep infinity

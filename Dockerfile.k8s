@@ -1,0 +1,10 @@
+# Dockerfile for Kubernetes load-runner (image includes app and data; no volume mount needed)
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y \
+    procps \
+    vim
+COPY . .
+CMD ["sleep", "infinity"]

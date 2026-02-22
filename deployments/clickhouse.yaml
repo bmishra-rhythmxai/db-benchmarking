@@ -1,0 +1,175 @@
+# Secret for cluster replication and default user password (change in production)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clickhouse-cluster-secret
+  namespace: clickhouse
+type: Opaque
+stringData:
+  secret: "strongpassword"
+---
+# ClickHouse Keeper (ZooKeeper replacement) - deploy before ClickHouse
+apiVersion: clickhouse-keeper.altinity.com/v1
+kind: ClickHouseKeeperInstallation
+metadata:
+  name: clickhouse-keeper
+  namespace: clickhouse
+spec:
+  configuration:
+    clusters:
+    - name: chk
+      layout:
+        replicasCount: 3
+    settings:
+      keeper_server/tcp_port: 9181
+  defaults:
+    templates:
+      podTemplate: keeper-pod
+      dataVolumeClaimTemplate: keeper-data
+      logVolumeClaimTemplate: keeper-log
+  templates:
+    podTemplates:
+    - name: keeper-pod
+      spec:
+        containers:
+        - name: clickhouse-keeper
+          image: clickhouse/clickhouse-keeper:26.1.3.52
+          resources:
+            requests:
+              memory: 1Gi
+              cpu: 500m
+            limits:
+              memory: 1Gi
+              cpu: 500m
+          volumeMounts:
+          - mountPath: /var/lib/clickhouse-keeper
+            name: keeper-data
+          - mountPath: /var/log/clickhouse-keeper
+            name: keeper-log
+    volumeClaimTemplates:
+    - name: keeper-data
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+        storageClassName: managed-csi
+    - name: keeper-log
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi
+        storageClassName: managed-csi
+---
+apiVersion: clickhouse.altinity.com/v1
+kind: ClickHouseInstallation
+metadata:
+  name: clickhouse
+  namespace: clickhouse
+spec:
+  configuration:
+    clusters:
+    - layout:
+        replicasCount: 2
+        shardsCount: 1
+      name: dev-cluster
+      secret:
+        valueFrom:
+          secretKeyRef:
+            key: secret
+            name: clickhouse-cluster-secret
+    profiles:
+      default/allow_experimental_join_condition: 1
+      default/prefer_localhost_replica: 1
+    users:
+      default/networks/ip:
+      - 0.0.0.0/0
+      default/password:
+        valueFrom:
+          secretKeyRef:
+            key: secret
+            name: clickhouse-cluster-secret
+    # ClickHouse Keeper (operator creates service keeper-clickhouse-keeper)
+    zookeeper:
+      nodes:
+      - host: keeper-clickhouse-keeper.clickhouse.svc.cluster.local
+        port: 9181
+    # Storage: local-only (tiered storage disabled). To enable Azure Blob tiering later,
+    # add <azure_blob> disk under <disks> and an <azure> volume under <volumes>, then set move_factor.
+    files:
+      distributed_ddl.xml: |
+        <clickhouse>
+          <distributed_ddl>
+            <task_max_lifetime>60</task_max_lifetime>
+          </distributed_ddl>
+        </clickhouse>
+      storage.xml: |
+        <clickhouse>
+          <storage_configuration>
+            <policies>
+              <hl7_tiered>
+                <volumes>
+                  <main>
+                    <disk>default</disk>
+                  </main>
+                </volumes>
+              </hl7_tiered>
+            </policies>
+          </storage_configuration>
+        </clickhouse>
+  defaults:
+    templates:
+      dataVolumeClaimTemplate: ch-data
+      logVolumeClaimTemplate: ch-log
+      podTemplate: ch-pod
+  templates:
+    podTemplates:
+    - name: ch-pod
+      spec:
+        affinity:
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: clickhouse.altinity.com/chi
+                    operator: In
+                    values:
+                    - clickhouse
+                topologyKey: kubernetes.io/hostname
+              weight: 100
+        containers:
+        - image: clickhouse/clickhouse-server:26.1.3.52
+          name: clickhouse
+          resources:
+            limits:
+              cpu: 4
+              memory: 8Gi
+            requests:
+              cpu: 4
+              memory: 8Gi
+          volumeMounts:
+          - mountPath: /var/lib/clickhouse
+            name: ch-data
+          - mountPath: /var/log/clickhouse-server
+            name: ch-log
+    volumeClaimTemplates:
+    - name: ch-data
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi
+        storageClassName: managed-csi
+    - name: ch-log
+      spec:
+        accessModes:
+        - ReadWriteOnce
+        resources:
+          requests:
+            storage: 50Gi
+        storageClassName: managed-csi

@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<!-- Disable system log tables to reduce I/O and background activity (benchmarking). -->
+<clickhouse>
+    <logger>
+        <level>warning</level>
+    </logger>
+</clickhouse>

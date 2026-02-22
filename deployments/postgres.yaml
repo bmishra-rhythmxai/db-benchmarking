@@ -1,0 +1,284 @@
+# PostgreSQL writer-reader (primary + read replicas) for hl7_messages benchmark.
+# - Writer: postgres / postgres-primary (writes, schema, DDL).
+# - Reader: postgres-reader (read-only replicas; use for query load).
+# Benchmark: POSTGRES_HOST=postgres (writer), optional POSTGRES_READER_HOST=postgres-reader (reader).
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-credentials
+  namespace: clickhouse
+type: Opaque
+stringData:
+  POSTGRES_USER: default
+  POSTGRES_PASSWORD: strongpassword
+  POSTGRES_DB: default
+  REPLICATION_PASSWORD: strongpassword
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-primary-init
+  namespace: clickhouse
+data:
+  00-replication-settings.sh: |
+    #!/bin/bash
+    set -e
+    echo "wal_level = replica" >> "$PGDATA/postgresql.conf"
+    echo "max_wal_senders = 4" >> "$PGDATA/postgresql.conf"
+    echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
+  01-setup-replication.sh: |
+    #!/bin/bash
+    set -e
+    # Allow default user for normal connections and for replication (pg_basebackup)
+    echo "host all default 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    echo "host all default ::0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    echo "host replication default 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    echo "host replication default ::0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "ALTER USER \"$POSTGRES_USER\" WITH REPLICATION;"
+    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT pg_reload_conf();"
+    echo "Replication setup for default user OK"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: clickhouse
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: managed-csi
+---
+# Primary (writer): accepts writes and streams WAL to replicas
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-primary
+  namespace: clickhouse
+  labels:
+    app: postgres-primary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-primary
+  template:
+    metadata:
+      labels:
+        app: postgres-primary
+    spec:
+      securityContext:
+        runAsUser: 70
+        fsGroup: 70
+      initContainers:
+      - name: fix-data-dir
+        image: busybox:1.36
+        command:
+          - /bin/sh
+          - -ec
+          - |
+            mkdir -p /var/lib/postgresql/data/pgdata
+            chown 70:70 /var/lib/postgresql/data/pgdata
+            chmod 0700 /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        securityContext:
+          runAsNonRoot: true
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_DB
+        - name: REPLICATION_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: REPLICATION_PASSWORD
+        resources:
+          requests:
+            cpu: 2
+            memory: 4Gi
+          limits:
+            cpu: 2
+            memory: 4Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: postgres-data
+      - name: init-scripts
+        configMap:
+          name: postgres-primary-init
+          defaultMode: 0755
+---
+# Read replicas: stream from primary (standby); use for read-only queries
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-replica
+  namespace: clickhouse
+  labels:
+    app: postgres-replica
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-replica
+  template:
+    metadata:
+      labels:
+        app: postgres-replica
+    spec:
+      securityContext:
+        runAsUser: 70
+        fsGroup: 70
+      initContainers:
+      - name: pg-basebackup
+        image: postgres:16-alpine
+        command:
+          - /bin/sh
+          - -ec
+          - |
+            until PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -h postgres-primary -p 5432 -U default -d default; do echo "waiting for primary..."; sleep 2; done
+            pg_basebackup -d "host=postgres-primary port=5432 user=default password=$POSTGRES_PASSWORD" -D /var/lib/postgresql/data -Fp -Xs -R
+            chown -R 70:70 /var/lib/postgresql/data
+        env:
+        - name: PGDATABASE
+          value: postgres
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-credentials
+              key: POSTGRES_PASSWORD
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        securityContext:
+          runAsNonRoot: true
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data
+        resources:
+          requests:
+            cpu: 2
+            memory: 4Gi
+          limits:
+            cpu: 2
+            memory: 4Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: data
+        emptyDir: {}
+---
+# Writer endpoint: use for inserts and schema (backward compat as "postgres")
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: clickhouse
+  labels:
+    app: postgres-primary
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: postgres-primary
+---
+# Explicit primary service (for replica's pg_basebackup target)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+  namespace: clickhouse
+  labels:
+    app: postgres-primary
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: postgres-primary
+---
+# Reader endpoint: use for read-only queries (load balance across replicas)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-reader
+  namespace: clickhouse
+  labels:
+    app: postgres-replica
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: postgres-replica
