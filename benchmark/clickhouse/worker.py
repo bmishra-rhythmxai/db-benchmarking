@@ -63,18 +63,24 @@ def _run_query_worker_clickhouse(
 
 
 class ClickHouseWorker(BaseInsertWorker):
-    """ClickHouse insert worker using a client queue. Pushes MRNs to query_queue for parallel query workers."""
+    """ClickHouse insert worker using a client queue. Pushes MRNs to query_queue for parallel query workers.
+    Can be used as a context (create with Worker(), call setup()) or as an insert worker (from ctx.make_worker())."""
 
     def __init__(
         self,
-        insertion_queue: queue.Queue,
-        query_queue: queue.Queue,
-        client_queue: queue.Queue,
-        inserted_lock: Any,
-        inserted_shared: list[int],
+        insertion_queue: queue.Queue | None = None,
+        query_queue: queue.Queue | None = None,
+        client_queue: queue.Queue | None = None,
+        inserted_lock: Any = None,
+        inserted_shared: list[int] | None = None,
+        batch_size: int | None = None,
+        batch_wait_sec: float | None = None,
+        _resources: _ClickHouseResources | None = None,
     ) -> None:
-        super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared)
+        self._resources = _resources
         self.client_queue = client_queue
+        if insertion_queue is not None and query_queue is not None and client_queue is not None and inserted_lock is not None and inserted_shared is not None and batch_size is not None and batch_wait_sec is not None:
+            super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec)
 
     def get_connection(self) -> Any:
         return self.client_queue.get()
@@ -85,9 +91,10 @@ class ClickHouseWorker(BaseInsertWorker):
     def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
         return backend.insert_batch(conn, batch)
 
-    @classmethod
-    def setup(cls, num_workers: int, target_rps: int) -> _ClickHouseResources:
-        """Resolve host/port, create client pool, prewarm, init schema. Returns resources (pass to make_worker and teardown)."""
+    def setup(self, num_workers: int, target_rps: int) -> ClickHouseWorker:
+        """Create client pool, prewarm, init schema. Resources are stored on this instance. Returns self."""
+        if self._resources is not None:
+            raise RuntimeError("ClickHouseWorker.setup() already called")
         host = os.environ.get("CLICKHOUSE_HOST") or DEFAULT_HOST
         port = DEFAULT_PORT
         pool_size = num_workers * 2  # insert workers + query workers
@@ -102,31 +109,39 @@ class ClickHouseWorker(BaseInsertWorker):
         client_queue: queue.Queue = queue.Queue()
         for c in ch_pool_list:
             client_queue.put(c)
-        return _ClickHouseResources(client_queue, ch_pool_list)
+        self._resources = _ClickHouseResources(client_queue, ch_pool_list)
+        return self
 
-    @staticmethod
-    def teardown(resources: _ClickHouseResources) -> None:
+    def teardown(self) -> None:
         """Disconnect all clients."""
-        for c in resources.clients:
-            c.disconnect()
+        if self._resources is not None:
+            for c in self._resources.clients:
+                c.disconnect()
+            self._resources = None
 
-    @staticmethod
     def make_worker(
+        self,
         insertion_queue: queue.Queue,
         query_queue: queue.Queue,
-        resources: _ClickHouseResources,
         inserted_lock: Any,
         inserted_shared: list[int],
+        batch_size: int,
+        batch_wait_sec: float,
     ) -> ClickHouseWorker:
-        """Return a ClickHouseWorker instance (use .run as thread target)."""
+        """Return a ClickHouseWorker instance that shares this instance's client queue (use .run as thread target)."""
         return ClickHouseWorker(
-            insertion_queue, query_queue, resources.client_queue, inserted_lock, inserted_shared
+            insertion_queue,
+            query_queue,
+            self._resources.client_queue,
+            inserted_lock,
+            inserted_shared,
+            batch_size,
+            batch_wait_sec,
         )
 
-    @staticmethod
     def make_query_worker(
+        self,
         query_queue: queue.Queue,
-        resources: _ClickHouseResources,
         queries_lock: threading.Lock,
         queries_shared: list[int],
         queries_per_record: int,
@@ -135,6 +150,14 @@ class ClickHouseWorker(BaseInsertWorker):
         """Return a callable to run as query worker thread target (consumes query_queue, runs lookups)."""
         def run() -> None:
             _run_query_worker_clickhouse(
-                query_queue, resources.client_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec
+                query_queue, self._resources.client_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec
             )
         return run
+
+    def get_max_patient_counter(self) -> int:
+        """Return the maximum patient ordinal in the database, or -1 if empty."""
+        client = self._resources.client_queue.get()
+        try:
+            return backend.get_max_patient_counter(client)
+        finally:
+            self._resources.client_queue.put(client)

@@ -1,0 +1,29 @@
+# Azure StorageClasses with fixed IOPS and throughput (Premium SSD v2).
+# Set your PVC's storageClassName to one of these. Min: 2 IOPS/GiB, 0.032 MB/s per GiB.
+# Driver: disk.csi.azure.com (AKS default).
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: managed-csi-premiumv2-3k-200
+provisioner: disk.csi.azure.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  skuname: PremiumV2_LRS
+  kind: managed
+  cachingMode: None
+  diskIopsReadWrite: "3000"
+  diskMbpsReadWrite: "200"
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: managed-csi-premiumv2-3k-400
+provisioner: disk.csi.azure.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  skuname: PremiumV2_LRS
+  kind: managed
+  cachingMode: None
+  diskIopsReadWrite: "3000"
+  diskMbpsReadWrite: "400"

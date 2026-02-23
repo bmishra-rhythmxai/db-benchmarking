@@ -55,18 +55,22 @@ def _run_query_worker_postgres(
 
 
 class PostgresWorker(BaseInsertWorker):
-    """PostgreSQL insert worker using a connection pool. Pushes MRNs to query_queue for parallel query workers."""
+    """PostgreSQL insert worker using a connection pool. Pushes MRNs to query_queue for parallel query workers.
+    Can be used as a context (create with Worker(), call setup()) or as an insert worker (from ctx.make_worker())."""
 
     def __init__(
         self,
-        insertion_queue: queue.Queue,
-        query_queue: queue.Queue,
-        pool: Any,
-        inserted_lock: threading.Lock,
-        inserted_shared: list[int],
+        insertion_queue: queue.Queue | None = None,
+        query_queue: queue.Queue | None = None,
+        pool: Any = None,
+        inserted_lock: threading.Lock | None = None,
+        inserted_shared: list[int] | None = None,
+        batch_size: int | None = None,
+        batch_wait_sec: float | None = None,
     ) -> None:
-        super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared)
         self.pool = pool
+        if insertion_queue is not None and query_queue is not None and pool is not None and inserted_lock is not None and inserted_shared is not None and batch_size is not None and batch_wait_sec is not None:
+            super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec)
 
     def get_connection(self) -> Any:
         return self.pool.getconn()
@@ -77,9 +81,10 @@ class PostgresWorker(BaseInsertWorker):
     def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
         return backend.insert_batch(conn, batch)
 
-    @classmethod
-    def setup(cls, num_workers: int, target_rps: int) -> Any:
-        """Resolve host/port, create pool, prewarm, init schema. Returns pool (pass to make_worker and teardown)."""
+    def setup(self, num_workers: int, target_rps: int) -> PostgresWorker:
+        """Create pool, prewarm, init schema. Resources are stored on this instance. Returns self."""
+        if self.pool is not None:
+            raise RuntimeError("PostgresWorker.setup() already called")
         host = os.environ.get("POSTGRES_HOST") or DEFAULT_HOST
         port = DEFAULT_PORT
         pool_size = num_workers * 2  # insert workers + query workers
@@ -87,36 +92,39 @@ class PostgresWorker(BaseInsertWorker):
             "Creating PostgreSQL connection pool at %s:%d (%d connections for %d insert + %d query workers) ...",
             host, port, pool_size, num_workers, num_workers,
         )
-        pool = backend.create_pool(host, port, pool_size)
-        backend.prewarm_pool(pool, pool_size)
-        conn = pool.getconn()
+        self.pool = backend.create_pool(host, port, pool_size)
+        backend.prewarm_pool(self.pool, pool_size)
+        conn = self.pool.getconn()
         try:
             backend.init_schema(conn)
         finally:
-            pool.putconn(conn)
+            self.pool.putconn(conn)
         logger.info("Starting insertions (target %d rows/sec) ...", target_rps)
-        return pool
+        return self
 
-    @staticmethod
-    def teardown(pool: Any) -> None:
+    def teardown(self) -> None:
         """Close all connections in the pool."""
-        pool.closeall()
+        if self.pool is not None:
+            self.pool.closeall()
+            self.pool = None
 
-    @staticmethod
     def make_worker(
+        self,
         insertion_queue: queue.Queue,
         query_queue: queue.Queue,
-        pool: Any,
         inserted_lock: threading.Lock,
         inserted_shared: list[int],
+        batch_size: int,
+        batch_wait_sec: float,
     ) -> PostgresWorker:
-        """Return a PostgresWorker instance (use .run as thread target)."""
-        return PostgresWorker(insertion_queue, query_queue, pool, inserted_lock, inserted_shared)
+        """Return a PostgresWorker instance that shares this instance's pool (use .run as thread target)."""
+        return PostgresWorker(
+            insertion_queue, query_queue, self.pool, inserted_lock, inserted_shared, batch_size, batch_wait_sec
+        )
 
-    @staticmethod
     def make_query_worker(
+        self,
         query_queue: queue.Queue,
-        pool: Any,
         queries_lock: threading.Lock,
         queries_shared: list[int],
         queries_per_record: int,
@@ -125,6 +133,14 @@ class PostgresWorker(BaseInsertWorker):
         """Return a callable to run as query worker thread target (consumes query_queue, runs lookups)."""
         def run() -> None:
             _run_query_worker_postgres(
-                query_queue, pool, queries_lock, queries_shared, queries_per_record, query_delay_sec
+                query_queue, self.pool, queries_lock, queries_shared, queries_per_record, query_delay_sec
             )
         return run
+
+    def get_max_patient_counter(self) -> int:
+        """Return the maximum patient ordinal in the database, or -1 if empty."""
+        conn = self.pool.getconn()
+        try:
+            return backend.get_max_patient_counter(conn)
+        finally:
+            self.pool.putconn(conn)

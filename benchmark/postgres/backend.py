@@ -86,8 +86,8 @@ def _row_from_producer_tuple(t: tuple[str, str, str]) -> tuple:
 def init_schema(conn) -> None:
     with conn.cursor() as cur:
         cur.execute("""
-            DROP TABLE IF EXISTS hl7_messages;
-            CREATE TABLE hl7_messages (
+            -- DROP TABLE IF EXISTS hl7_messages;
+            CREATE TABLE IF NOT EXISTS hl7_messages (
                 fhir_id TEXT,
                 rx_patient_id TEXT,
                 source TEXT,
@@ -154,3 +154,13 @@ def query_by_primary_key(conn, medical_record_number: str) -> list:
             (medical_record_number,),
         )
         return cur.fetchall()
+
+
+def get_max_patient_counter(conn) -> int:
+    """Return the maximum patient ordinal in hl7_messages (from PATIENT_ID 'patient-NNNNNNNNNN'), or -1 if empty."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT COALESCE(MAX(CAST(SUBSTRING(patient_id FROM 10) AS BIGINT)), -1) FROM hl7_messages WHERE patient_id IS NOT NULL AND patient_id ~ '^patient-[0-9]+$'"
+        )
+        row = cur.fetchone()
+    return int(row[0]) if row is not None else -1

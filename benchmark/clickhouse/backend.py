@@ -195,3 +195,13 @@ def query_by_primary_key(client, medical_record_number: str) -> list:
         # settings={"select_sequential_consistency": 1},
     )
     return list(result) if result else []
+
+
+def get_max_patient_counter(client) -> int:
+    """Return the maximum patient ordinal in hl7_messages (from PATIENT_ID 'patient-NNNNNNNNNN'), or -1 if empty."""
+    result = client.execute(
+        f"SELECT COALESCE(MAX(toInt64OrZero(substring(PATIENT_ID, 10))), -1) FROM {DB_NAME}.hl7_messages WHERE PATIENT_ID != ''"
+    )
+    if not result or result[0][0] is None:
+        return -1
+    return int(result[0][0])

@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
       - name: load-runner
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking:v0.0.11
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking:v0.0.12
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:

@@ -2,7 +2,7 @@
 """
 HL7 messages load benchmark: PostgreSQL or ClickHouse at 1000 inserts/sec.
 Uses dynamic patient generation and in-memory sample messages.
-Multithreaded: producer enqueues batches at target rate; workers insert in parallel.
+Multithreaded: producer enqueues records at target rate; workers batch (1s or batch_size) and insert in parallel.
 """
 import argparse
 import logging
@@ -23,7 +23,18 @@ def main() -> None:
     )
     p.add_argument("--database", choices=["postgres", "clickhouse"], required=True)
     p.add_argument("--duration", type=float, default=60.0, help="Run duration in seconds")
-    p.add_argument("--batch-size", type=int, default=100, help="Rows per batch")
+    p.add_argument(
+        "--batch-size",
+        type=int,
+        default=100,
+        help="Max rows per batch; consumer flushes on batch_size or batch-wait-sec, whichever first",
+    )
+    p.add_argument(
+        "--batch-wait-sec",
+        type=float,
+        default=1.0,
+        help="Max seconds to wait before flushing a partial batch (default: 1.0)",
+    )
     p.add_argument(
         "--workers",
         type=int,
@@ -40,7 +51,7 @@ def main() -> None:
         "--rows-per-second",
         type=int,
         default=1000,
-        help="Target insert rate (rows/sec); producer enqueues batches at this rate",
+        help="Target insert rate (rows/sec); producer enqueues records at this rate",
     )
     p.add_argument(
         "--queries-per-record",
@@ -58,11 +69,14 @@ def main() -> None:
 
     if args.workers < 1:
         p.error("--workers must be >= 1")
+    if args.batch_wait_sec <= 0:
+        p.error("--batch-wait-sec must be > 0")
 
     run_load(
         database=args.database,
         duration_sec=args.duration,
         batch_size=args.batch_size,
+        batch_wait_sec=args.batch_wait_sec,
         workers=args.workers,
         patient_count=args.patient_count,
         target_rps=args.rows_per_second,

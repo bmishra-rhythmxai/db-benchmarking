@@ -1,0 +1,11 @@
+# PostgreSQL 18 with perf and nmon for benchmarking/profiling.
+# Build and push to your registry, then set the image in deployments/postgres.yaml.
+FROM postgres:18.2-bookworm
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iotop sudo linux-perf nmon \
+    && rm -rf /var/lib/apt/lists/* \
+    && echo 'postgres ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/postgres \
+    && chmod 440 /etc/sudoers.d/postgres
+USER 999

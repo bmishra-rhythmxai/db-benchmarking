@@ -17,17 +17,31 @@ Considering the indexing and other storages, disk required 50 GB
 
 Standard vs Premium disks (To be tested)
 
+### Controlling IOPS and throughput (Azure)
+
+Use a distinct StorageClass per performance tier (Premium SSD v2). Set your PVC's `storageClassName` to the desired class. See `deployments/azure-storage-class-iops.yaml` for examples: `managed-csi-premiumv2-2k-200`, `managed-csi-premiumv2-5k-400`. Add more StorageClasses for other IOPS/throughput combinations. Min: 2 IOPS/GiB, 0.032 MB/s per GiB.
+
+nmon -f -s1 -c120
+dstat -tcmrdD sdb
+
+export TAG=v0.0.7
+docker build -t devgwrxacr.azurecr.io/bikash/postgres:${TAG} -f Dockerfile.postgres .
+docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}
+sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bikash/postgres:${TAG}|" deployments/postgres.yaml
+k apply -f deployments/postgres.yaml
 
 top -b -p 1 -d 1 | grep clickhouse-serv
-python main.py --database clickhouse --duration 10 --batch-size 2 --workers 20 --rows-per-second 10 --queries-per-record 2 --query-delay 100
+python main.py --database clickhouse --duration 10 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 10 --queries-per-record 2
 
-python main.py --database postgres --duration 60 --batch-size 2 --workers 20 --rows-per-second 100 --queries-per-record 2
+python main.py --database postgres --duration 60 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 100 --queries-per-record 2
 
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
-export TAG=v0.0.11
+export TAG=v0.0.12
 docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
+sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml
+k apply -f deployments/load-runner.yaml
 
 -- drop table hl7_messages on cluster default sync
 -- drop table hl7_messages_local sync
@@ -55,3 +69,22 @@ docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 -- select * from system.merge_tree_settings order by name settings query_cache_system_table_handling = 'ignore';
 -- select * from system.replicated_merge_tree_settings order by name settings query_cache_system_table_handling = 'ignore';
 -- select * from system.server_settings order by name settings query_cache_system_table_handling = 'ignore';
+
+## Linux perf and nmon on Postgres pods
+
+Perf and nmon are installed via an init container (Debian bookworm-slim; nmon is not in Alpine repos) and available under `/opt/perf/`. The main containers have `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE` so perf can run.
+
+**perf (primary or replica):**
+```bash
+k exec -it deploy/postgres-primary -n clickhouse -c postgres -- /opt/perf/perf record -F 99 -g -p 1 -- sleep 30
+# or replica
+k exec -it deploy/postgres-replica -n clickhouse -c postgres -- /opt/perf/perf record -F 99 -g -p 1 -- sleep 30
+```
+
+Copy out the `perf.data` and run `perf report` locally, or run `perf report` in the pod. If you see kernel version mismatches, consider using the node’s perf via a hostPath volume (mount host’s `/usr/bin/perf` and optionally `/lib/modules`).
+
+**nmon (interactive):**
+```bash
+k exec -it deploy/postgres-primary -n clickhouse -c postgres -- /opt/perf/nmon
+```
+Press single-letter keys for views (c=cpu, m=mem, d=disk, n=network, etc.); `q` to quit.

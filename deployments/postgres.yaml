@@ -50,7 +50,7 @@ spec:
   resources:
     requests:
       storage: 50Gi
-  storageClassName: managed-csi
+  storageClassName: managed-csi-premiumv2-3k-400
 ---
 # Primary (writer): accepts writes and streams WAL to replicas
 apiVersion: apps/v1
@@ -71,8 +71,8 @@ spec:
         app: postgres-primary
     spec:
       securityContext:
-        runAsUser: 70
-        fsGroup: 70
+        runAsUser: 999
+        fsGroup: 999
       initContainers:
       - name: fix-data-dir
         image: busybox:1.36
@@ -81,7 +81,7 @@ spec:
           - -ec
           - |
             mkdir -p /var/lib/postgresql/data/pgdata
-            chown 70:70 /var/lib/postgresql/data/pgdata
+            chown 999:999 /var/lib/postgresql/data/pgdata
             chmod 0700 /var/lib/postgresql/data/pgdata
         volumeMounts:
         - name: data
@@ -91,9 +91,18 @@ spec:
           runAsNonRoot: false
       containers:
       - name: postgres
-        image: postgres:16-alpine
+        # Image with perf + nmon: build from repo root with
+        #   docker build -f Dockerfile.postgres -t postgres-perf:16 .
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.7
         securityContext:
           runAsNonRoot: true
+          capabilities:
+            add:
+            - CAP_NET_ADMIN   # required for iotop (taskstats netlink)
+            - CAP_SYS_ADMIN
+            - CAP_SYS_PTRACE
+            # CAP_PERFMON (kernel 5.8+) allows perf without full SYS_ADMIN; add if your kernel supports it
+            # - CAP_PERFMON
         ports:
         - containerPort: 5432
           name: postgres
@@ -172,18 +181,18 @@ spec:
         app: postgres-replica
     spec:
       securityContext:
-        runAsUser: 70
-        fsGroup: 70
+        runAsUser: 999
+        fsGroup: 999
       initContainers:
       - name: pg-basebackup
-        image: postgres:16-alpine
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.7
         command:
           - /bin/sh
           - -ec
           - |
             until PGPASSWORD="$POSTGRES_PASSWORD" pg_isready -h postgres-primary -p 5432 -U default -d default; do echo "waiting for primary..."; sleep 2; done
             pg_basebackup -d "host=postgres-primary port=5432 user=default password=$POSTGRES_PASSWORD" -D /var/lib/postgresql/data -Fp -Xs -R
-            chown -R 70:70 /var/lib/postgresql/data
+            chown -R 999:999 /var/lib/postgresql/data
         env:
         - name: PGDATABASE
           value: postgres
@@ -200,9 +209,15 @@ spec:
           runAsNonRoot: false
       containers:
       - name: postgres
-        image: postgres:16-alpine
+        # Same image as primary (perf + nmon): build with docker build -f Dockerfile.postgres -t postgres-perf:16 .
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.7
         securityContext:
           runAsNonRoot: true
+          capabilities:
+            add:
+            - CAP_NET_ADMIN   # required for iotop (taskstats netlink)
+            - CAP_SYS_ADMIN
+            - CAP_SYS_PTRACE
         ports:
         - containerPort: 5432
           name: postgres

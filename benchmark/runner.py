@@ -12,13 +12,23 @@ from .progress import run_progress_logger
 
 logger = logging.getLogger(__name__)
 
-Batch = list[tuple[str, str, str]]
+Record = tuple[str, str, str]
+
+
+def _worker_for_database(database: str):
+    """Return the Worker class for the given database (postgres or clickhouse)."""
+    if database == "postgres":
+        from . import postgres
+        return postgres.PostgresWorker
+    from . import clickhouse
+    return clickhouse.ClickHouseWorker
 
 
 def run_load(
     database: str,
     duration_sec: float,
     batch_size: int,
+    batch_wait_sec: float,
     workers: int,
     patient_count: int,
     target_rps: int,
@@ -26,7 +36,7 @@ def run_load(
     query_delay_sec: float = 0.0,
 ) -> None:
     num_workers = workers
-    insertion_queue: queue.Queue[Batch | None] = queue.Queue(maxsize=num_workers * 2)
+    insertion_queue: queue.Queue[Record | None] = queue.Queue(maxsize=num_workers * 2)
     query_queue: queue.Queue = queue.Queue(maxsize=num_workers * 4)
 
     inserted_lock = threading.Lock()
@@ -37,32 +47,22 @@ def run_load(
     run_start = time.perf_counter()
 
     logger.info(
-        "Connecting to %s (workers=%d, batch_size=%d, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
-        database, num_workers, batch_size, duration_sec, target_rps, queries_per_record, query_delay_sec * 1000,
+        "Connecting to %s (workers=%d, batch_size=%d, batch_wait_sec=%.1f, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
+        database, num_workers, batch_size, batch_wait_sec, duration_sec, target_rps, queries_per_record, query_delay_sec * 1000,
     )
 
-    if database == "postgres":
-        from . import postgres
-
-        Worker = postgres.PostgresWorker
-        resources = Worker.setup(num_workers, target_rps)
-        worker_inst = Worker.make_worker(
-            insertion_queue, query_queue, resources, inserted_lock, inserted_shared
-        )
-        query_worker_run = Worker.make_query_worker(
-            query_queue, resources, queries_lock, queries_shared, queries_per_record, query_delay_sec
-        )
-    else:
-        from . import clickhouse
-
-        Worker = clickhouse.ClickHouseWorker
-        resources = Worker.setup(num_workers, target_rps)
-        worker_inst = Worker.make_worker(
-            insertion_queue, query_queue, resources, inserted_lock, inserted_shared
-        )
-        query_worker_run = Worker.make_query_worker(
-            query_queue, resources, queries_lock, queries_shared, queries_per_record, query_delay_sec
-        )
+    Worker = _worker_for_database(database)
+    worker_ctx = Worker()
+    worker_ctx.setup(num_workers, target_rps)
+    worker_inst = worker_ctx.make_worker(
+        insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec
+    )
+    query_worker_run = worker_ctx.make_query_worker(
+        query_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec
+    )
+    max_counter = worker_ctx.get_max_patient_counter()
+    patient_start = max(0, max_counter + 1)
+    logger.info("Producer starting from patient counter %d (max in DB: %d)", patient_start, max_counter)
 
     progress_thread = threading.Thread(
         target=run_progress_logger,
@@ -79,6 +79,7 @@ def run_load(
         threading.Thread(target=query_worker_run, daemon=True)
         for _ in range(num_workers)
     ]
+
     for w in insert_worker_threads:
         w.start()
     for w in query_worker_threads:
@@ -86,32 +87,39 @@ def run_load(
 
     prod = threading.Thread(
         target=run_producer,
-        args=(duration_sec, batch_size, patient_count, insertion_queue, num_workers, target_rps),
+        args=(duration_sec, patient_count, insertion_queue, num_workers, target_rps, patient_start),
         daemon=True,
     )
+
     prod.start()
     prod.join()
+
     insertion_queue.join()
+
     progress_stop.set()
     progress_thread.join(timeout=1.0)
+
     for w in insert_worker_threads:
         w.join()
 
     for _ in range(num_workers):
         query_queue.put(QUERY_SENTINEL)
+
     for w in query_worker_threads:
         w.join()
 
-    Worker.teardown(resources)
+    worker_ctx.teardown()
 
     run_end = time.perf_counter()
     total_inserted_final = inserted_shared[0]
     elapsed = run_end - run_start
     actual_rps = total_inserted_final / elapsed if elapsed > 0 else 0
+
     logger.info(
         "Run finished: %d rows inserted in %.2fs (%.1f rows/sec, target %d)",
         total_inserted_final, elapsed, actual_rps, target_rps,
     )
+
     print(f"Database: {database}")
     print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final}")
     print(f"Actual rate: {actual_rps:.1f} rows/sec (target {target_rps})")
