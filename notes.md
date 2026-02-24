@@ -22,22 +22,34 @@ Standard vs Premium disks (To be tested)
 Use a distinct StorageClass per performance tier (Premium SSD v2). Set your PVC's `storageClassName` to the desired class. See `deployments/azure-storage-class-iops.yaml` for examples: `managed-csi-premiumv2-2k-200`, `managed-csi-premiumv2-5k-400`. Add more StorageClasses for other IOPS/throughput combinations. Min: 2 IOPS/GiB, 0.032 MB/s per GiB.
 
 nmon -f -s1 -c120
-dstat -tcmrdD sdb
 
-export TAG=v0.0.7
+DSTAT_PID=1 dstat -tcm --custom-pid-cpu-mem
+DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -trd -Dtotal,sda,sdh --custom-freespace
+DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -tcmrd -Dtotal,sda,sdh --custom-freespace
+
+iostat -mdx 1 | awk '
+$1=="Device" {
+  printf "%-10s %-10s %-10s %-10s %-10s %-10s %-10s %-10s\n", "Device", "r/s", "rMB/s", "r_await", "w/s", "wMB/s", "w_await", "%util"
+  next
+}
+$1 ~ /^(sda|sdb)/ {
+  printf "%-10s %-10f %-10f %-10f %-10f %-10f %-10f %-10f\n", $1, $2, $3, $6, $8, $9, $12, $23
+}'
+
+export TAG=v0.0.10
 docker build -t devgwrxacr.azurecr.io/bikash/postgres:${TAG} -f Dockerfile.postgres .
 docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bikash/postgres:${TAG}|" deployments/postgres.yaml
 k apply -f deployments/postgres.yaml
 
 top -b -p 1 -d 1 | grep clickhouse-serv
-python main.py --database clickhouse --duration 10 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 10 --queries-per-record 2
+python main.py --database clickhouse --duration 1800 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 100 --queries-per-record 2
 
-python main.py --database postgres --duration 60 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 100 --queries-per-record 2
+python main.py --database postgres   --duration 1800 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 100 --queries-per-record 2
 
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
-export TAG=v0.0.12
+export TAG=v0.0.13
 docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml

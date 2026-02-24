@@ -49,8 +49,8 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 50Gi
-  storageClassName: managed-csi-premiumv2-3k-400
+      storage: 500Gi
+  storageClassName: managed-csi-premiumv2-3k-200
 ---
 # Primary (writer): accepts writes and streams WAL to replicas
 apiVersion: apps/v1
@@ -93,8 +93,9 @@ spec:
       - name: postgres
         # Image with perf + nmon: build from repo root with
         #   docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.7
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.10
         securityContext:
+          privileged: true
           runAsNonRoot: true
           capabilities:
             add:
@@ -185,7 +186,7 @@ spec:
         fsGroup: 999
       initContainers:
       - name: pg-basebackup
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.7
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.10
         command:
           - /bin/sh
           - -ec
@@ -210,8 +211,9 @@ spec:
       containers:
       - name: postgres
         # Same image as primary (perf + nmon): build with docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.7
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.10
         securityContext:
+          privileged: true
           runAsNonRoot: true
           capabilities:
             add:

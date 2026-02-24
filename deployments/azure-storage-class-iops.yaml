@@ -8,6 +8,7 @@ metadata:
   name: managed-csi-premiumv2-3k-200
 provisioner: disk.csi.azure.com
 volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
 parameters:
   skuname: PremiumV2_LRS
   kind: managed
@@ -21,6 +22,7 @@ metadata:
   name: managed-csi-premiumv2-3k-400
 provisioner: disk.csi.azure.com
 volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
 parameters:
   skuname: PremiumV2_LRS
   kind: managed
