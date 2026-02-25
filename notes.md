@@ -23,7 +23,7 @@ Use a distinct StorageClass per performance tier (Premium SSD v2). Set your PVC'
 
 nmon -f -s1 -c120
 
-DSTAT_PID=1 dstat -tcm --custom-pid-cpu-mem
+dstat -tcm --custom-cpu-mem
 DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -trd -Dtotal,sda,sdh --custom-freespace
 DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -tcmrd -Dtotal,sda,sdh --custom-freespace
 
@@ -36,7 +36,7 @@ $1 ~ /^(sda|sdb)/ {
   printf "%-10s %-10f %-10f %-10f %-10f %-10f %-10f %-10f\n", $1, $2, $3, $6, $8, $9, $12, $23
 }'
 
-export TAG=v0.0.10
+export TAG=v0.0.11
 docker build -t devgwrxacr.azurecr.io/bikash/postgres:${TAG} -f Dockerfile.postgres .
 docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bikash/postgres:${TAG}|" deployments/postgres.yaml
@@ -49,7 +49,7 @@ python main.py --database postgres   --duration 1800 --batch-size 2 --batch-wait
 
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
-export TAG=v0.0.13
+export TAG=v0.0.14
 docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml

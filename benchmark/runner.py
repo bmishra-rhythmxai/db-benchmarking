@@ -12,7 +12,7 @@ from .progress import run_progress_logger
 
 logger = logging.getLogger(__name__)
 
-Record = tuple[str, str, str]
+Record = tuple[str, str, str, bool]
 
 
 def _worker_for_database(database: str):
@@ -40,9 +40,9 @@ def run_load(
     query_queue: queue.Queue = queue.Queue(maxsize=num_workers * 4)
 
     inserted_lock = threading.Lock()
-    inserted_shared: list[int] = [0]
+    inserted_shared: list[float] = [0, 0, 0, 0.0]  # [total, originals, duplicates, total_insert_latency_sec]
     queries_lock = threading.Lock()
-    queries_shared: list[int] = [0]
+    queries_shared: list[float] = [0, 0.0]  # [count, total_latency_sec]
     progress_stop = threading.Event()
     run_start = time.perf_counter()
 
@@ -111,15 +111,26 @@ def run_load(
     worker_ctx.teardown()
 
     run_end = time.perf_counter()
-    total_inserted_final = inserted_shared[0]
+    total_inserted_final = int(inserted_shared[0])
+    originals_final = int(inserted_shared[1])
+    duplicates_final = int(inserted_shared[2])
+    total_insert_latency_sec = inserted_shared[3]
+    queries_final = int(queries_shared[0])
+    total_query_latency_sec = queries_shared[1]
     elapsed = run_end - run_start
     actual_rps = total_inserted_final / elapsed if elapsed > 0 else 0
+    avg_insert_latency_ms = (total_insert_latency_sec / total_inserted_final * 1000.0) if total_inserted_final > 0 else 0.0
+    avg_query_latency_ms = (total_query_latency_sec / queries_final * 1000.0) if queries_final > 0 else 0.0
 
     logger.info(
-        "Run finished: %d rows inserted in %.2fs (%.1f rows/sec, target %d)",
-        total_inserted_final, elapsed, actual_rps, target_rps,
+        "Run finished: %d rows inserted (%d original, %d duplicate) in %.2fs (%.1f rows/sec, target %d)",
+        total_inserted_final, originals_final, duplicates_final, elapsed, actual_rps, target_rps,
     )
 
     print(f"Database: {database}")
-    print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final}")
+    print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final} ({originals_final} original, {duplicates_final} duplicate)")
     print(f"Actual rate: {actual_rps:.1f} rows/sec (target {target_rps})")
+    if total_inserted_final > 0:
+        print(f"Insert latency: avg {avg_insert_latency_ms:.2f} ms/row")
+    if queries_final > 0:
+        print(f"Queries: {queries_final} executed (avg latency {avg_query_latency_ms:.2f} ms)")

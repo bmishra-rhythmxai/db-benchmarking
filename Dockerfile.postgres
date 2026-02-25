@@ -25,11 +25,11 @@ RUN curl -sSL "https://github.com/EnterpriseDB/system_stats/archive/refs/tags/${
     && rm -rf /tmp/system_stats /tmp/system_stats.tar.gz \
     && apt-get purge -y --auto-remove build-essential curl postgresql-server-dev-18
 
+COPY dstat/dstat_custom_cpu_mem.py /usr/share/dstat/
+RUN chmod 644 /usr/share/dstat/dstat_custom_cpu_mem.py
+
 COPY dstat/dstat_custom_freespace.py /usr/share/dstat/
 RUN chmod 644 /usr/share/dstat/dstat_custom_freespace.py
-
-COPY dstat/dstat_custom_pid_cpu_mem.py /usr/share/dstat/
-RUN chmod 644 /usr/share/dstat/dstat_custom_pid_cpu_mem.py
 
 RUN ln -s /proc/mounts /etc/mtab
 

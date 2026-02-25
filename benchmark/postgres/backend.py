@@ -90,7 +90,7 @@ def init_schema(conn) -> None:
             CREATE TABLE IF NOT EXISTS hl7_messages (
                 fhir_id TEXT,
                 rx_patient_id TEXT,
-                source TEXT,
+                source TEXT COMPRESSION lz4,
                 cdc TEXT,
                 created_at TIMESTAMPTZ NOT NULL,
                 created_by TEXT,
@@ -119,6 +119,8 @@ def init_schema(conn) -> None:
                 is_pregnant TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_hl7_patient_id ON hl7_messages(patient_id);
+            -- Ensure source uses LZ4 compression (for existing tables)
+            ALTER TABLE hl7_messages ALTER COLUMN source SET COMPRESSION lz4;
         """)
     conn.commit()
     logger.info("Table hl7_messages created (PostgreSQL)")

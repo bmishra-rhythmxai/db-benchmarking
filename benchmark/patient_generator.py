@@ -36,6 +36,7 @@ def generate_bulk_patients(
         mrn = f"MRN-{ordinal}"
         pid = f"patient-{ordinal}"
         patients.append({
+            "is_original": True,
             "FHIR_ID": pid,
             "RX_PATIENT_ID": f"rx-{pid}",
             "SOURCE": base_source,
@@ -64,5 +65,6 @@ def generate_bulk_patients(
     for j in range(n_duplicates):
         patients.append(patients[j % n_unique].copy())
         patients[-1]["SOURCE"] = base_source
+        patients[-1]["is_original"] = False
 
     return patients

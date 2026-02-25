@@ -13,7 +13,7 @@ from .config import INSERTION_SENTINEL
 
 logger = logging.getLogger(__name__)
 
-Record = tuple[str, str, str]
+Record = tuple[str, str, str, bool]
 Batch = list[Record]
 Conn = TypeVar("Conn")
 
@@ -21,7 +21,8 @@ Conn = TypeVar("Conn")
 def _mrns_from_batch(batch: Batch) -> list[str]:
     """Extract MEDICAL_RECORD_NUMBER from each record in the batch. Skips invalid/empty; logs and continues."""
     mrns: list[str] = []
-    for _pid, _msg_type, json_str in batch:
+    for record in batch:
+        json_str = record[2]
         try:
             mrn = json.loads(json_str).get("MEDICAL_RECORD_NUMBER")
         except (json.JSONDecodeError, KeyError, TypeError):
@@ -42,7 +43,7 @@ class BaseInsertWorker(ABC):
         insertion_queue: queue.Queue[Record | None],
         query_queue: queue.Queue[str | Any],
         inserted_lock: threading.Lock,
-        inserted_shared: list[int],
+        inserted_shared: list[float],
         batch_size: int,
         batch_wait_sec: float,
     ) -> None:
@@ -64,19 +65,27 @@ class BaseInsertWorker(ABC):
         ...
 
     @abstractmethod
-    def insert_batch(self, conn: Any, batch: Batch) -> int:
+    def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
         """Insert the batch using the given connection. Return number of rows inserted."""
         ...
 
     def _flush(self, batch: Batch) -> None:
-        """Insert batch, update inserted count, push MRNs to query_queue."""
+        """Insert batch, update inserted count (total, originals, duplicates), insert latency, push MRNs to query_queue."""
         if not batch:
             return
         conn = self.get_connection()
         try:
-            n = self.insert_batch(conn, batch)
+            batch_for_db: list[tuple[str, str, str]] = [(r[0], r[1], r[2]) for r in batch]
+            t0 = time.perf_counter()
+            n = self.insert_batch(conn, batch_for_db)
+            insert_latency_sec = time.perf_counter() - t0
+            n_originals = sum(1 for r in batch if r[3])
+            n_duplicates = len(batch) - n_originals
             with self.inserted_lock:
                 self.inserted_shared[0] += n
+                self.inserted_shared[1] += n_originals
+                self.inserted_shared[2] += n_duplicates
+                self.inserted_shared[3] += insert_latency_sec
             insert_time = time.time()
             for mrn in _mrns_from_batch(batch):
                 self.query_queue.put((mrn, insert_time))

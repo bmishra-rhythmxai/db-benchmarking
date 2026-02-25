@@ -117,7 +117,7 @@ def init_schema(client) -> None:
         )
         ENGINE = Distributed('{cluster}', '{DB_NAME}', hl7_messages_local, rand())
     """)
-    logger.info("Cluster tables hl7_messages (Distributed) and hl7_messages_local created (ClickHouse)")
+    logger.info("Cluster tables hl7_messages created (ClickHouse)")
 
 
 # Column order must match init_schema; used to build rows from producer (patient_id, type, json).

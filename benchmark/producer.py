@@ -8,7 +8,7 @@ import time
 from .config import INSERTION_SENTINEL
 from .patient_generator import generate_bulk_patients
 
-Record = tuple[str, str, str]
+Record = tuple[str, str, str, bool]
 
 # Message type for rows built from generate_bulk_patients (patient record as message body)
 PATIENT_MESSAGE_TYPE = "PATIENT"
@@ -28,7 +28,8 @@ def _next_record(
         )
         patient_start += n_unique
     p = patient_records.pop(0)
-    record: Record = (p["PATIENT_ID"], PATIENT_MESSAGE_TYPE, json.dumps(p, default=str))
+    is_original = p.pop("is_original", True)
+    record: Record = (p["PATIENT_ID"], PATIENT_MESSAGE_TYPE, json.dumps(p, default=str), is_original)
     return record, patient_start
 
 

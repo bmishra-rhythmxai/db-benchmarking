@@ -30,7 +30,7 @@ def _run_query_worker_clickhouse(
     query_queue: queue.Queue,
     client_queue: queue.Queue,
     queries_lock: threading.Lock,
-    queries_shared: list[int],
+    queries_shared: list[float],
     queries_per_record: int,
     query_delay_sec: float = 0.0,
 ) -> None:
@@ -48,8 +48,11 @@ def _run_query_worker_clickhouse(
                 time.sleep(sleep_sec)
         conn = client_queue.get()
         try:
+            total_latency_sec = 0.0
             for _ in range(queries_per_record):
+                t0 = time.perf_counter()
                 rows = backend.query_by_primary_key(conn, mrn)
+                total_latency_sec += time.perf_counter() - t0
                 if len(rows) != 1:
                     logger.error(
                         "Query by primary key returned %d rows for MEDICAL_RECORD_NUMBER=%s (expected 1)",
@@ -57,6 +60,7 @@ def _run_query_worker_clickhouse(
                     )
             with queries_lock:
                 queries_shared[0] += queries_per_record
+                queries_shared[1] += total_latency_sec
         finally:
             client_queue.put(conn)
         query_queue.task_done()
@@ -72,7 +76,7 @@ class ClickHouseWorker(BaseInsertWorker):
         query_queue: queue.Queue | None = None,
         client_queue: queue.Queue | None = None,
         inserted_lock: Any = None,
-        inserted_shared: list[int] | None = None,
+        inserted_shared: list[float] | None = None,
         batch_size: int | None = None,
         batch_wait_sec: float | None = None,
         _resources: _ClickHouseResources | None = None,
@@ -124,7 +128,7 @@ class ClickHouseWorker(BaseInsertWorker):
         insertion_queue: queue.Queue,
         query_queue: queue.Queue,
         inserted_lock: Any,
-        inserted_shared: list[int],
+        inserted_shared: list[float],
         batch_size: int,
         batch_wait_sec: float,
     ) -> ClickHouseWorker:
@@ -143,7 +147,7 @@ class ClickHouseWorker(BaseInsertWorker):
         self,
         query_queue: queue.Queue,
         queries_lock: threading.Lock,
-        queries_shared: list[int],
+        queries_shared: list[float],
         queries_per_record: int,
         query_delay_sec: float = 0.0,
     ):
