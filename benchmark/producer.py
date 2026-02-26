@@ -40,9 +40,13 @@ def run_producer(
     num_workers: int,
     target_rps: int,
     patient_start: int = 0,
+    sentinels: int | None = None,
 ) -> None:
-    """Enqueue single records at target_rps until duration_sec, then enqueue num_workers sentinels.
-    patient_start is the starting counter for MRN/patient IDs (e.g. from get_max_patient_counter + 1)."""
+    """Enqueue single records at target_rps until duration_sec, then enqueue sentinels.
+    patient_start is the starting counter for MRN/patient IDs (e.g. from get_max_patient_counter + 1).
+    sentinels: number of INSERTION_SENTINEL to put at end; None = num_workers (single producer), 0 = none (multi-producer)."""
+    if sentinels is None:
+        sentinels = num_workers
     interval = 1.0 / target_rps if target_rps > 0 else 0.0
     start = time.perf_counter()
     next_put_at = start
@@ -59,5 +63,5 @@ def run_producer(
                 next_put_at = now + interval
         else:
             time.sleep(min(0.001, next_put_at - now))
-    for _ in range(num_workers):
+    for _ in range(sentinels):
         insertion_queue.put(INSERTION_SENTINEL)

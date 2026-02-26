@@ -23,12 +23,19 @@ def create_pool(host: str, port: int, size: int):
     )
 
 
+def _set_session_sync_commit(conn) -> None:
+    """Set synchronous_commit = off for this session (faster writes, no config change)."""
+    with conn.cursor() as cur:
+        cur.execute("SET synchronous_commit = off")
+
+
 def prewarm_pool(pool, size: int) -> None:
     """Prewarm the pool by acquiring and releasing each connection."""
     conns = []
     for _ in range(size):
         conns.append(pool.getconn())
     for c in conns:
+        _set_session_sync_commit(c)
         pool.putconn(c)
     logger.info("Prewarmed PostgreSQL connection pool (%d connections)", size)
 

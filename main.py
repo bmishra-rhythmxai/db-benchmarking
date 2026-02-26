@@ -54,6 +54,12 @@ def main() -> None:
         help="Target insert rate (rows/sec); producer enqueues records at this rate",
     )
     p.add_argument(
+        "--producers",
+        type=int,
+        default=1,
+        help="Number of producer threads to generate load (default 1); use more if a single producer cannot sustain target RPS",
+    )
+    p.add_argument(
         "--queries-per-record",
         type=int,
         default=10,
@@ -69,6 +75,8 @@ def main() -> None:
 
     if args.workers < 1:
         p.error("--workers must be >= 1")
+    if args.producers < 1:
+        p.error("--producers must be >= 1")
     if args.batch_wait_sec <= 0:
         p.error("--batch-wait-sec must be > 0")
 
@@ -82,6 +90,7 @@ def main() -> None:
         target_rps=args.rows_per_second,
         queries_per_record=args.queries_per_record,
         query_delay_sec=args.query_delay / 1000.0,
+        producer_threads=args.producers,
     )
 
 

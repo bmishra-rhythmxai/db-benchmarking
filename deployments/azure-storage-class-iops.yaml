@@ -33,7 +33,7 @@ parameters:
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
-  name: managed-csi-premiumv2-5k-800
+  name: managed-csi-premiumv2-10k-1000
 provisioner: disk.csi.azure.com
 volumeBindingMode: WaitForFirstConsumer
 allowVolumeExpansion: true
@@ -41,5 +41,5 @@ parameters:
   skuname: PremiumV2_LRS
   kind: managed
   cachingMode: None
-  diskIopsReadWrite: "5000"
-  diskMbpsReadWrite: "800"
+  diskIopsReadWrite: "10000"
+  diskMbpsReadWrite: "1000"

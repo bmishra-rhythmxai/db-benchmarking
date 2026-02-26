@@ -21,6 +21,14 @@ metadata:
   name: postgres-primary-init
   namespace: clickhouse
 data:
+  00-postgres-tuning.sh: |
+    #!/bin/bash
+    set -e
+    echo "shared_buffers = 1GB" >> "$PGDATA/postgresql.conf"
+    echo "wal_buffers = 128MB" >> "$PGDATA/postgresql.conf"
+    echo "wal_compression = lz4" >> "$PGDATA/postgresql.conf"
+    echo "effective_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
+    echo "maintenance_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
   00-replication-settings.sh: |
     #!/bin/bash
     set -e
@@ -50,7 +58,7 @@ spec:
   resources:
     requests:
       storage: 10Ti
-  storageClassName: managed-csi-premiumv2-5k-800
+  storageClassName: managed-csi-premiumv2-10k-1000
 ---
 # Primary (writer): accepts writes and streams WAL to replicas
 apiVersion: apps/v1
@@ -95,7 +103,6 @@ spec:
         #   docker build -f Dockerfile.postgres -t postgres-perf:16 .
         image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
         securityContext:
-          privileged: true
           runAsNonRoot: true
           capabilities:
             add:
@@ -213,7 +220,6 @@ spec:
         # Same image as primary (perf + nmon): build with docker build -f Dockerfile.postgres -t postgres-perf:16 .
         image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
         securityContext:
-          privileged: true
           runAsNonRoot: true
           capabilities:
             add:

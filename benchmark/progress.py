@@ -37,8 +37,11 @@ def run_progress_logger(
         interval_avg_insert_ms = (interval_latency_sec / interval_total * 1000.0) if interval_total > 0 else 0.0
         cumulative_avg_insert_ms = (total_insert_latency_sec / total * 1000.0) if total > 0 else 0.0
         logger.info(
-            "Insert progress: %d total, %d original, %d duplicate (this interval, avg latency %.2f ms) | cumulative: %d total, %d original, %d duplicate (avg latency %.2f ms)",
+            "Insert progress (this interval): %d total, %d original, %d duplicate, avg latency %.2f ms",
             interval_total, interval_originals, interval_duplicates, interval_avg_insert_ms,
+        )
+        logger.info(
+            "Insert progress (cumulative): %d total, %d original, %d duplicate, avg latency %.2f ms",
             int(total), int(originals), int(duplicates), cumulative_avg_insert_ms,
         )
         with queries_lock:
@@ -51,6 +54,10 @@ def run_progress_logger(
         avg_latency_ms = (total_latency_sec / q * 1000.0) if q > 0 else 0.0
         interval_avg_ms = (interval_query_latency_sec / interval_q * 1000.0) if interval_q > 0 else 0.0
         logger.info(
-            "Query progress: %d queries this interval (avg %.2f ms), %d cumulative (avg latency %.2f ms)",
-            interval_q, interval_avg_ms, q, avg_latency_ms,
+            "Query progress (this interval): %d queries, avg latency %.2f ms",
+            interval_q, interval_avg_ms,
+        )
+        logger.info(
+            "Query progress (cumulative): %d queries, avg latency %.2f ms",
+            q, avg_latency_ms,
         )

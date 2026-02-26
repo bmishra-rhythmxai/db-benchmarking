@@ -1,36 +1,15 @@
-# PostgreSQL 18 with perf and nmon for benchmarking/profiling.
+# PostgreSQL 18 with sysstat for benchmarking.
 # Build and push to your registry, then set the image in deployments/postgres.yaml.
-FROM postgres:18.2-bookworm
+FROM postgres:18.2-trixie
 
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        sudo dstat sysstat \
-        build-essential curl \
-        postgresql-server-dev-18 \
+        sudo \
+        sysstat \
     && rm -rf /var/lib/apt/lists/* \
     && echo 'postgres ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/postgres \
     && chmod 440 /etc/sudoers.d/postgres
-
-# Build and install system_stats extension (EnterpriseDB); use tarball to avoid git SSL issues in build
-ARG SYSTEM_STATS_VERSION=v3.2.1
-RUN curl -sSL "https://github.com/EnterpriseDB/system_stats/archive/refs/tags/${SYSTEM_STATS_VERSION}.tar.gz" -o /tmp/system_stats.tar.gz \
-    && tar xzf /tmp/system_stats.tar.gz -C /tmp \
-    && mv /tmp/system_stats-* /tmp/system_stats \
-    && cd /tmp/system_stats \
-    && make USE_PGXS=1 \
-    && make install USE_PGXS=1 \
-    && cd / \
-    && rm -rf /tmp/system_stats /tmp/system_stats.tar.gz \
-    && apt-get purge -y --auto-remove build-essential curl postgresql-server-dev-18
-
-COPY dstat/dstat_custom_cpu_mem.py /usr/share/dstat/
-RUN chmod 644 /usr/share/dstat/dstat_custom_cpu_mem.py
-
-COPY dstat/dstat_custom_freespace.py /usr/share/dstat/
-RUN chmod 644 /usr/share/dstat/dstat_custom_freespace.py
-
-RUN ln -s /proc/mounts /etc/mtab
 
 USER 999

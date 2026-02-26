@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 
-from .config import QUERY_SENTINEL
+from .config import INSERTION_SENTINEL, QUERY_SENTINEL
 from .producer import run_producer
 from .progress import run_progress_logger
 
@@ -34,6 +34,7 @@ def run_load(
     target_rps: int,
     queries_per_record: int,
     query_delay_sec: float = 0.0,
+    producer_threads: int = 1,
 ) -> None:
     num_workers = workers
     insertion_queue: queue.Queue[Record | None] = queue.Queue(maxsize=num_workers * 2)
@@ -47,8 +48,8 @@ def run_load(
     run_start = time.perf_counter()
 
     logger.info(
-        "Connecting to %s (workers=%d, batch_size=%d, batch_wait_sec=%.1f, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
-        database, num_workers, batch_size, batch_wait_sec, duration_sec, target_rps, queries_per_record, query_delay_sec * 1000,
+        "Connecting to %s (workers=%d, producers=%d, batch_size=%d, batch_wait_sec=%.1f, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
+        database, num_workers, producer_threads, batch_size, batch_wait_sec, duration_sec, target_rps, queries_per_record, query_delay_sec * 1000,
     )
 
     Worker = _worker_for_database(database)
@@ -61,8 +62,10 @@ def run_load(
         query_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec
     )
     max_counter = worker_ctx.get_max_patient_counter()
-    patient_start = max(0, max_counter + 1)
-    logger.info("Producer starting from patient counter %d (max in DB: %d)", patient_start, max_counter)
+    patient_start_base = max(0, max_counter + 1)
+    # Large offset per producer so patient ID ranges don't overlap
+    patient_start_stride = 10_000_000
+    logger.info("Producers starting from patient counter %d (max in DB: %d)", patient_start_base, max_counter)
 
     progress_thread = threading.Thread(
         target=run_progress_logger,
@@ -85,14 +88,37 @@ def run_load(
     for w in query_worker_threads:
         w.start()
 
-    prod = threading.Thread(
-        target=run_producer,
-        args=(duration_sec, patient_count, insertion_queue, num_workers, target_rps, patient_start),
-        daemon=True,
-    )
+    # Split target_rps across producer threads so total ≈ target_rps
+    per_producer = target_rps // producer_threads
+    remainder = target_rps % producer_threads
 
-    prod.start()
-    prod.join()
+    def producer_target(producer_index: int) -> None:
+        rps = per_producer + (1 if producer_index < remainder else 0)
+        if rps <= 0:
+            return
+        start = patient_start_base + producer_index * patient_start_stride
+        run_producer(
+            duration_sec,
+            patient_count,
+            insertion_queue,
+            num_workers,
+            target_rps=rps,
+            patient_start=start,
+            sentinels=0,
+        )
+
+    producer_threads_list = [
+        threading.Thread(target=producer_target, args=(i,), daemon=True)
+        for i in range(producer_threads)
+    ]
+    for p in producer_threads_list:
+        p.start()
+    for p in producer_threads_list:
+        p.join()
+
+    # Single producer puts sentinels; multi-producer: we put them here once
+    for _ in range(num_workers):
+        insertion_queue.put(INSERTION_SENTINEL)
 
     insertion_queue.join()
 
