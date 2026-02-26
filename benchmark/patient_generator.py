@@ -26,7 +26,7 @@ def generate_bulk_patients(
     genders = ("male", "female", "other")
     patients: list[dict[str, Any]] = []
     base_source = "".join(
-        random.choices(string.ascii_letters + string.digits, k=200 * 1024)
+        random.choices(string.ascii_letters + string.digits, k=2 * 1024 * 1024)
     )
 
     for i in range(n_unique):

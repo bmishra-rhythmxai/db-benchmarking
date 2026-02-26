@@ -24,8 +24,10 @@ Use a distinct StorageClass per performance tier (Premium SSD v2). Set your PVC'
 nmon -f -s1 -c120
 
 dstat -tcm --custom-cpu-mem
-DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -trd -Dtotal,sda,sdh --custom-freespace
-DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -tcmrd -Dtotal,sda,sdh --custom-freespace
+DSTAT_FREESPACE_MOUNTS=/var/lib/postgresql:root,/var/lib/postgresql/data:data dstat -trd -Dtotal,sda,sdb --custom-cpu-mem --custom-freespace
+
+DSTAT_FREESPACE_MOUNTS=/var/lib/clickhouse:data,/var/log/clickhouse-server:log dstat -trd -Dtotal,sda,sdb,sdc --custom-cpu-mem --custom-freespace
+
 
 iostat -mdx 1 | awk '
 $1=="Device" {
@@ -36,20 +38,20 @@ $1 ~ /^(sda|sdb)/ {
   printf "%-10s %-10f %-10f %-10f %-10f %-10f %-10f %-10f\n", $1, $2, $3, $6, $8, $9, $12, $23
 }'
 
-export TAG=v0.0.11
+export TAG=v0.0.13
 docker build -t devgwrxacr.azurecr.io/bikash/postgres:${TAG} -f Dockerfile.postgres .
 docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bikash/postgres:${TAG}|" deployments/postgres.yaml
 k apply -f deployments/postgres.yaml
 
 top -b -p 1 -d 1 | grep clickhouse-serv
-python main.py --database clickhouse --duration 1800 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 100 --queries-per-record 2
+python main.py --database clickhouse --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
 
-python main.py --database postgres   --duration 1800 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 100 --queries-per-record 2
+python main.py --database postgres   --duration 21600 --batch-size 20 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
 
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
-export TAG=v0.0.14
+export TAG=v0.0.16
 docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml
@@ -82,21 +84,38 @@ k apply -f deployments/load-runner.yaml
 -- select * from system.replicated_merge_tree_settings order by name settings query_cache_system_table_handling = 'ignore';
 -- select * from system.server_settings order by name settings query_cache_system_table_handling = 'ignore';
 
-## Linux perf and nmon on Postgres pods
+-- SELECT * FROM pg_compression;
+-- SHOW default_toast_compression;
+-- SELECT reltoastrelid::regclass FROM pg_class WHERE relname = 'hl7_messages';
+-- SELECT pg_size_pretty(pg_total_relation_size('pg_toast.pg_toast_16389'));
+-- SELECT length(source) AS logical_size, pg_column_size(source) AS physical_size FROM hl7_messages LIMIT 10;
+-- SELECT sum(length(source)) AS total_logical, sum(pg_column_size(source)) AS total_physical, round(sum(pg_column_size(source))::numeric / sum(length(source)) * 100, 2) AS percent_of_original FROM hl7_messages;
+-- SELECT attstorage, attcompression FROM pg_attribute WHERE attrelid = 'hl7_messages'::regclass AND attname = 'source';
+-- select version();
+-- select * from hl7_messages limit 10;
 
-Perf and nmon are installed via an init container (Debian bookworm-slim; nmon is not in Alpine repos) and available under `/opt/perf/`. The main containers have `CAP_SYS_ADMIN` and `CAP_SYS_PTRACE` so perf can run.
+--   SELECT a.attname,
+--          CASE a.attstorage
+--            WHEN 'p' THEN 'PLAIN'
+--            WHEN 'e' THEN 'EXTERNAL'
+--            WHEN 'm' THEN 'MAIN'
+--            WHEN 'x' THEN 'EXTENDED'
+--          END AS storage,
+--          a.attcompression
+--   FROM pg_attribute a
+--   JOIN pg_class c ON c.oid = a.attrelid
+--   JOIN pg_namespace n ON n.oid = c.relnamespace
+--   WHERE c.relname = 'hl7_messages'
+--     AND n.nspname = 'public'
+--     AND a.attname = 'source'
+--     AND NOT a.attisdropped;
 
-**perf (primary or replica):**
-```bash
-k exec -it deploy/postgres-primary -n clickhouse -c postgres -- /opt/perf/perf record -F 99 -g -p 1 -- sleep 30
-# or replica
-k exec -it deploy/postgres-replica -n clickhouse -c postgres -- /opt/perf/perf record -F 99 -g -p 1 -- sleep 30
-```
+--   SELECT pg_column_compression(source) AS compression_used
+--   FROM hl7_messages
+--   LIMIT 1;
 
-Copy out the `perf.data` and run `perf report` locally, or run `perf report` in the pod. If you see kernel version mismatches, consider using the node’s perf via a hostPath volume (mount host’s `/usr/bin/perf` and optionally `/lib/modules`).
+--   SELECT pg_column_toast_chunk_id(source) AS toast_chunk_id
+--   FROM hl7_messages
+--   LIMIT 1;
 
-**nmon (interactive):**
-```bash
-k exec -it deploy/postgres-primary -n clickhouse -c postgres -- /opt/perf/nmon
-```
-Press single-letter keys for views (c=cpu, m=mem, d=disk, n=network, etc.); `q` to quit.
+--update hl7_messages set source = source;

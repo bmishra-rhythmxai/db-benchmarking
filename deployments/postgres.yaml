@@ -49,8 +49,8 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 500Gi
-  storageClassName: managed-csi-premiumv2-3k-200
+      storage: 10Ti
+  storageClassName: managed-csi-premiumv2-5k-800
 ---
 # Primary (writer): accepts writes and streams WAL to replicas
 apiVersion: apps/v1
@@ -93,7 +93,7 @@ spec:
       - name: postgres
         # Image with perf + nmon: build from repo root with
         #   docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.11
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
         securityContext:
           privileged: true
           runAsNonRoot: true
@@ -132,11 +132,11 @@ spec:
               key: REPLICATION_PASSWORD
         resources:
           requests:
-            cpu: 2
-            memory: 4Gi
+            cpu: 4
+            memory: 8Gi
           limits:
-            cpu: 2
-            memory: 4Gi
+            cpu: 4
+            memory: 8Gi
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data
@@ -186,7 +186,7 @@ spec:
         fsGroup: 999
       initContainers:
       - name: pg-basebackup
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.11
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
         command:
           - /bin/sh
           - -ec
@@ -211,7 +211,7 @@ spec:
       containers:
       - name: postgres
         # Same image as primary (perf + nmon): build with docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.11
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
         securityContext:
           privileged: true
           runAsNonRoot: true
@@ -228,11 +228,11 @@ spec:
           value: /var/lib/postgresql/data
         resources:
           requests:
-            cpu: 2
-            memory: 4Gi
+            cpu: 4
+            memory: 8Gi
           limits:
-            cpu: 2
-            memory: 4Gi
+            cpu: 4
+            memory: 8Gi
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data

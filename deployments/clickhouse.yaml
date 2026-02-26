@@ -146,11 +146,11 @@ spec:
           name: clickhouse
           resources:
             limits:
-              cpu: 4
-              memory: 8Gi
+              cpu: 8
+              memory: 16Gi
             requests:
-              cpu: 4
-              memory: 8Gi
+              cpu: 8
+              memory: 16Gi
           volumeMounts:
           - mountPath: /var/lib/clickhouse
             name: ch-data
@@ -163,13 +163,13 @@ spec:
         - ReadWriteOnce
         resources:
           requests:
-            storage: 50Gi
-        storageClassName: managed-csi
+            storage: 10Ti
+        storageClassName: managed-csi-premiumv2-3k-400
     - name: ch-log
       spec:
         accessModes:
         - ReadWriteOnce
         resources:
           requests:
-            storage: 50Gi
-        storageClassName: managed-csi
+            storage: 10Ti
+        storageClassName: managed-csi-premiumv2-3k-400

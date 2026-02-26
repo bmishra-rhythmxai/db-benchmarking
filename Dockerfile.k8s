@@ -5,6 +5,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 RUN apt-get update && apt-get install -y \
     procps \
-    vim
+    vim \
+    dstat
 COPY . .
+# Install custom dstat plugins (loaded via dstat --custom-cpu-mem, --custom-freespace)
+COPY dstat/dstat_custom_cpu_mem.py dstat/dstat_custom_freespace.py /usr/share/dstat/
 CMD ["sleep", "infinity"]

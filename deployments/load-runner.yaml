@@ -23,16 +23,16 @@ spec:
     spec:
       containers:
       - name: load-runner
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking:v0.0.14
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking:v0.0.15
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:
           requests:
             cpu: 4
-            memory: 4Gi
+            memory: 8Gi
           limits:
             cpu: 4
-            memory: 4Gi
+            memory: 8Gi
         env:
         - name: CLICKHOUSE_HOST
           value: chi-clickhouse-dev-cluster-0-0
