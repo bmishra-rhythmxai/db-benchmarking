@@ -1,29 +1,29 @@
-# Load-runner pod for running benchmarks against postgres/clickhouse in the benchmark namespace.
-# Build an image that includes the app: docker build -f Dockerfile.k8s -t load-runner:latest .
-# Then run: kubectl apply -f deploy-load-runner.yaml
-# Exec in and run: python main.py --database postgres --duration 60
-# Or: python main.py --database clickhouse --duration 60
+# Load-runner (Go) pod for running benchmarks against postgres/clickhouse in the benchmark namespace.
+# Build: docker build -f Dockerfile.k8s.go -t load-runner-go:latest benchmark-go
+# Then: kubectl apply -f deployments/load-runner-go.yaml
+# Exec in and run: /app/loadrunner --database postgres --duration 60
+# Or: /app/loadrunner --database clickhouse --duration 60
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: load-runner
+  name: load-runner-go
   namespace: clickhouse
   labels:
-    app: load-runner
+    app: load-runner-go
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: load-runner
+      app: load-runner-go
   template:
     metadata:
       labels:
-        app: load-runner
+        app: load-runner-go
     spec:
       containers:
-      - name: load-runner
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking:v0.0.31
+      - name: load-runner-go
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-go:v0.0.1
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:

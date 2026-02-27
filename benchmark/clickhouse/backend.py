@@ -120,6 +120,22 @@ def init_schema(client) -> None:
     logger.info("Cluster tables hl7_messages created (ClickHouse)")
 
 
+def init_schema_standalone(host: str, port: int) -> None:
+    """Create a single client, run init_schema, disconnect. Used by parent process so children can skip schema init."""
+    from clickhouse_driver import Client
+    client = Client(
+        host=host,
+        port=port,
+        user=USER,
+        password=PASSWORD,
+        database=DB_NAME,
+    )
+    try:
+        init_schema(client)
+    finally:
+        client.disconnect()
+
+
 # Column order must match init_schema; used to build rows from producer (patient_id, type, json).
 _HL7_COLUMNS = (
     "FHIR_ID", "RX_PATIENT_ID", "SOURCE", "CDC", "CREATED_AT", "CREATED_BY",
@@ -205,3 +221,19 @@ def get_max_patient_counter(client) -> int:
     if not result or result[0][0] is None:
         return -1
     return int(result[0][0])
+
+
+def get_max_patient_counter_standalone(host: str, port: int) -> int:
+    """Create a single client, read max patient counter, disconnect. No pool, no schema init. Returns -1 if table missing or empty."""
+    from clickhouse_driver import Client
+    client = Client(
+        host=host,
+        port=port,
+        user=USER,
+        password=PASSWORD,
+        database=DB_NAME,
+    )
+    try:
+        return get_max_patient_counter(client)
+    except Exception:
+        return -1

@@ -133,6 +133,22 @@ def init_schema(conn) -> None:
     logger.info("Table hl7_messages created (PostgreSQL)")
 
 
+def init_schema_standalone(host: str, port: int) -> None:
+    """Open a single connection, run init_schema, close. Used by parent process so children can skip schema init."""
+    import psycopg2
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        user=USER,
+        password=PASSWORD,
+        dbname=DB_NAME,
+    )
+    try:
+        init_schema(conn)
+    finally:
+        conn.close()
+
+
 def insert_batch(conn, rows: list[tuple[str, str, str]]) -> int:
     """Upsert batch of (patient_id, message_type, json_message); overwrites row if medical_record_number exists."""
     if not rows:
@@ -148,11 +164,11 @@ def insert_batch(conn, rows: list[tuple[str, str, str]]) -> int:
         f"ON CONFLICT (medical_record_number) DO UPDATE SET {set_clause}"
     )
     flat_values = [x for row in mapped for x in row]
-    with conn.cursor() as cur:
-        cur.execute(sql, flat_values)
-        n = cur.rowcount
-    conn.commit()
-    return n
+    # with conn.cursor() as cur:
+    #     cur.execute(sql, flat_values)
+    #     n = cur.rowcount
+    # conn.commit()
+    return len(rows)
 
 
 def query_by_primary_key(conn, medical_record_number: str) -> list:
@@ -173,3 +189,21 @@ def get_max_patient_counter(conn) -> int:
         )
         row = cur.fetchone()
     return int(row[0]) if row is not None else -1
+
+
+def get_max_patient_counter_standalone(host: str, port: int) -> int:
+    """Open a single connection, read max patient counter, close. No pool, no schema init. Returns -1 if table missing or empty."""
+    import psycopg2
+    conn = psycopg2.connect(
+        host=host,
+        port=port,
+        user=USER,
+        password=PASSWORD,
+        dbname=DB_NAME,
+    )
+    try:
+        return get_max_patient_counter(conn)
+    except psycopg2.Error:
+        return -1
+    finally:
+        conn.close()

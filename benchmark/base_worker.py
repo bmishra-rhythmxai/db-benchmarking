@@ -46,6 +46,7 @@ class BaseInsertWorker(ABC):
         inserted_shared: list[float],
         batch_size: int,
         batch_wait_sec: float,
+        queries_per_record: int = 1,
     ) -> None:
         self.insertion_queue = insertion_queue
         self.query_queue = query_queue
@@ -53,6 +54,7 @@ class BaseInsertWorker(ABC):
         self.inserted_shared = inserted_shared
         self.batch_size = batch_size
         self.batch_wait_sec = batch_wait_sec
+        self.queries_per_record = queries_per_record
 
     @abstractmethod
     def get_connection(self) -> Any:
@@ -86,25 +88,33 @@ class BaseInsertWorker(ABC):
                 self.inserted_shared[1] += n_originals
                 self.inserted_shared[2] += n_duplicates
                 self.inserted_shared[3] += insert_latency_sec
-            insert_time = time.time()
-            for mrn in _mrns_from_batch(batch):
-                self.query_queue.put((mrn, insert_time))
+            if self.queries_per_record > 0:
+                insert_time = time.time()
+                for mrn in _mrns_from_batch(batch):
+                    self.query_queue.put((mrn, insert_time))
         finally:
             self.release_connection(conn)
+
+    # Short poll interval so we don't block for batch_wait_sec when queue is empty (which would
+    # throttle the producer and cap throughput at queue_size / batch_wait_sec).
+    _GET_POLL_SEC = 0.1  # 100ms; workers wake often to drain queue and keep producer unblocked
 
     def run(self) -> None:
         """Run the worker loop: get records, batch (flush on batch_size or batch_wait_sec), insert, push MRNs. Stops on INSERTION_SENTINEL."""
         accumulated: Batch = []
         batch_start = time.perf_counter()
         while True:
-            timeout_sec = max(0.001, self.batch_wait_sec - (time.perf_counter() - batch_start))
+            batch_elapsed = time.perf_counter() - batch_start
+            # Never block longer than _GET_POLL_SEC so queue drain isn't starved by batch_wait_sec.
+            timeout_sec = min(self._GET_POLL_SEC, max(0.001, self.batch_wait_sec - batch_elapsed))
             try:
                 record = self.insertion_queue.get(timeout=timeout_sec)
             except queue.Empty:
-                if accumulated:
+                now = time.perf_counter()
+                if accumulated and (now - batch_start) >= self.batch_wait_sec:
                     self._flush(accumulated)
                     accumulated = []
-                batch_start = time.perf_counter()
+                    batch_start = now
                 continue
             if record is INSERTION_SENTINEL:
                 self.insertion_queue.task_done()

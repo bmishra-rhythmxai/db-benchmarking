@@ -548,7 +548,7 @@ def print_metrics_sources_summary(
         else:
             lines.append("  Memory: /proc/meminfo (MemTotal, MemFree) → tot/vsz/rss")
     if not no_disk:
-        lines.append("  Disk: /proc/diskstats (read_ios, read_sectors, write_ios, write_sectors) → r, w, rIO, wIO per device")
+        lines.append("  Disk: /proc/diskstats (read_ios, read_sectors, write_ios, write_sectors) → rIOPS, wIOPS, r/s, w/s per device")
         lines.append("        /sys/block (size); /proc/mounts (used/free per device) → tot, used, free")
         if block_filter:
             lines.append(f"        (filter: {', '.join(block_filter)})")
@@ -741,10 +741,10 @@ def main() -> None:
                 used_s = human_bytes_short(used) if used is not None else f"{'-':>{NUM_WIDTH}}"
                 free_s = human_bytes_short(free) if free is not None else f"{'-':>{NUM_WIDTH}}"
                 groups.append((f"{name} (host)", [
-                    ("r", human_rate_short(r_bps)),
-                    ("w", human_rate_short(w_bps)),
-                    ("rIO", f"{r_ios:{NUM_FMT}}"),
-                    ("wIO", f"{w_ios:{NUM_FMT}}"),
+                    ("rIOPS", f"{r_ios:{NUM_FMT}}"),
+                    ("wIOPS", f"{w_ios:{NUM_FMT}}"),
+                    ("r/s", human_rate_short(r_bps)),
+                    ("w/s", human_rate_short(w_bps)),
                     ("used", used_s),
                     ("free", free_s),
                     ("tot", human_bytes_short(total)),

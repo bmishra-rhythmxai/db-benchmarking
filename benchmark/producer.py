@@ -41,23 +41,31 @@ def run_producer(
     target_rps: int,
     patient_start: int = 0,
     sentinels: int | None = None,
+    max_records: int | None = None,
 ) -> None:
-    """Enqueue single records at target_rps until duration_sec, then enqueue sentinels.
+    """Enqueue single records at target_rps until duration_sec or max_records (if set), then enqueue sentinels.
     patient_start is the starting counter for MRN/patient IDs (e.g. from get_max_patient_counter + 1).
-    sentinels: number of INSERTION_SENTINEL to put at end; None = num_workers (single producer), 0 = none (multi-producer)."""
+    sentinels: number of INSERTION_SENTINEL to put at end; None = num_workers (single producer), 0 = none (multi-producer).
+    max_records: if set, stop after this many records (rate-limited by target_rps); duration_sec is ignored when set."""
     if sentinels is None:
         sentinels = num_workers
     interval = 1.0 / target_rps if target_rps > 0 else 0.0
     start = time.perf_counter()
     next_put_at = start
     patient_records: list[dict] = []
-    while time.perf_counter() - start < duration_sec:
+    count = 0
+    while True:
+        if max_records is not None and count >= max_records:
+            break
+        if max_records is None and time.perf_counter() - start >= duration_sec:
+            break
         now = time.perf_counter()
         if now >= next_put_at:
             record, patient_start = _next_record(
                 patient_records, patient_count, patient_start
             )
             insertion_queue.put(record)
+            count += 1
             next_put_at = next_put_at + interval
             if next_put_at < now:
                 next_put_at = now + interval

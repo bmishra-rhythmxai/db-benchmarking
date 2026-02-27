@@ -79,12 +79,13 @@ class ClickHouseWorker(BaseInsertWorker):
         inserted_shared: list[float] | None = None,
         batch_size: int | None = None,
         batch_wait_sec: float | None = None,
+        queries_per_record: int = 1,
         _resources: _ClickHouseResources | None = None,
     ) -> None:
         self._resources = _resources
         self.client_queue = client_queue
         if insertion_queue is not None and query_queue is not None and client_queue is not None and inserted_lock is not None and inserted_shared is not None and batch_size is not None and batch_wait_sec is not None:
-            super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec)
+            super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec, queries_per_record)
 
     def get_connection(self) -> Any:
         return self.client_queue.get()
@@ -95,8 +96,8 @@ class ClickHouseWorker(BaseInsertWorker):
     def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
         return backend.insert_batch(conn, batch)
 
-    def setup(self, num_workers: int, target_rps: int) -> ClickHouseWorker:
-        """Create client pool, prewarm, init schema. Resources are stored on this instance. Returns self."""
+    def setup(self, num_workers: int, target_rps: int, init_schema: bool = True) -> ClickHouseWorker:
+        """Create client pool, prewarm, optionally init schema. Resources are stored on this instance. Returns self."""
         if self._resources is not None:
             raise RuntimeError("ClickHouseWorker.setup() already called")
         host = os.environ.get("CLICKHOUSE_HOST") or DEFAULT_HOST
@@ -108,7 +109,8 @@ class ClickHouseWorker(BaseInsertWorker):
         )
         ch_pool_list = backend.create_pool(host, port, pool_size)
         backend.prewarm_pool(ch_pool_list)
-        backend.init_schema(ch_pool_list[0])
+        if init_schema:
+            backend.init_schema(ch_pool_list[0])
         logger.info("Starting insertions (target %d rows/sec) ...", target_rps)
         client_queue: queue.Queue = queue.Queue()
         for c in ch_pool_list:
@@ -131,6 +133,7 @@ class ClickHouseWorker(BaseInsertWorker):
         inserted_shared: list[float],
         batch_size: int,
         batch_wait_sec: float,
+        queries_per_record: int = 1,
     ) -> ClickHouseWorker:
         """Return a ClickHouseWorker instance that shares this instance's client queue (use .run as thread target)."""
         return ClickHouseWorker(
@@ -141,6 +144,7 @@ class ClickHouseWorker(BaseInsertWorker):
             inserted_shared,
             batch_size,
             batch_wait_sec,
+            queries_per_record,
         )
 
     def make_query_worker(

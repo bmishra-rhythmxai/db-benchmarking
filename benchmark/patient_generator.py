@@ -8,6 +8,14 @@ import random
 import string
 from typing import Any
 
+# Pre-generate 100 payloads at startup to avoid slow per-call generation
+_PAYLOAD_POOL_SIZE = 100
+_PAYLOAD_SIZE = 2 * 1024 * 1024  # 2 MiB
+_PAYLOAD_POOL: list[str] = [
+    "".join(random.choices(string.ascii_letters + string.digits, k=_PAYLOAD_SIZE))
+    for _ in range(_PAYLOAD_POOL_SIZE)
+]
+
 
 def generate_bulk_patients(
     start: int = 0,
@@ -25,9 +33,7 @@ def generate_bulk_patients(
     )
     genders = ("male", "female", "other")
     patients: list[dict[str, Any]] = []
-    base_source = "".join(
-        random.choices(string.ascii_letters + string.digits, k=2 * 1024 * 1024)
-    )
+    base_source = random.choice(_PAYLOAD_POOL)
 
     for i in range(n_unique):
         fn = first_names[i % len(first_names)]

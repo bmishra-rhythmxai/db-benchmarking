@@ -14,7 +14,7 @@ from . import backend
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_HOST = "postgres"
+DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 5432
 
 
@@ -71,10 +71,11 @@ class PostgresWorker(BaseInsertWorker):
         inserted_shared: list[float] | None = None,
         batch_size: int | None = None,
         batch_wait_sec: float | None = None,
+        queries_per_record: int = 1,
     ) -> None:
         self.pool = pool
         if insertion_queue is not None and query_queue is not None and pool is not None and inserted_lock is not None and inserted_shared is not None and batch_size is not None and batch_wait_sec is not None:
-            super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec)
+            super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec, queries_per_record)
 
     def get_connection(self) -> Any:
         return self.pool.getconn()
@@ -85,8 +86,8 @@ class PostgresWorker(BaseInsertWorker):
     def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
         return backend.insert_batch(conn, batch)
 
-    def setup(self, num_workers: int, target_rps: int) -> PostgresWorker:
-        """Create pool, prewarm, init schema. Resources are stored on this instance. Returns self."""
+    def setup(self, num_workers: int, target_rps: int, init_schema: bool = True) -> PostgresWorker:
+        """Create pool, prewarm, optionally init schema. Resources are stored on this instance. Returns self."""
         if self.pool is not None:
             raise RuntimeError("PostgresWorker.setup() already called")
         host = os.environ.get("POSTGRES_HOST") or DEFAULT_HOST
@@ -98,11 +99,12 @@ class PostgresWorker(BaseInsertWorker):
         )
         self.pool = backend.create_pool(host, port, pool_size)
         backend.prewarm_pool(self.pool, pool_size)
-        conn = self.pool.getconn()
-        try:
-            backend.init_schema(conn)
-        finally:
-            self.pool.putconn(conn)
+        if init_schema:
+            conn = self.pool.getconn()
+            try:
+                backend.init_schema(conn)
+            finally:
+                self.pool.putconn(conn)
         logger.info("Starting insertions (target %d rows/sec) ...", target_rps)
         return self
 
@@ -120,10 +122,11 @@ class PostgresWorker(BaseInsertWorker):
         inserted_shared: list[float],
         batch_size: int,
         batch_wait_sec: float,
+        queries_per_record: int = 1,
     ) -> PostgresWorker:
         """Return a PostgresWorker instance that shares this instance's pool (use .run as thread target)."""
         return PostgresWorker(
-            insertion_queue, query_queue, self.pool, inserted_lock, inserted_shared, batch_size, batch_wait_sec
+            insertion_queue, query_queue, self.pool, inserted_lock, inserted_shared, batch_size, batch_wait_sec, queries_per_record
         )
 
     def make_query_worker(
