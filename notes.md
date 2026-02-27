@@ -23,8 +23,8 @@ Use a distinct StorageClass per performance tier (Premium SSD v2). Set your PVC'
 
 nmon -f -s1 -c120
 
-python scripts/system_monitor.py
-python scripts/system_monitor.py --block sda,sdb --net eth0
+python3 system_monitor.py --no-disk
+python3 system_monitor.py --no-cpu --no-mem --no-net
 
 iostat -mdx 1 | awk '
 $1=="Device" {

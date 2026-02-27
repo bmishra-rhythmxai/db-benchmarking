@@ -12,4 +12,7 @@ RUN apt-get update \
     && echo 'postgres ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/postgres \
     && chmod 440 /etc/sudoers.d/postgres
 
+COPY scripts/system_monitor.py /scripts/system_monitor.py
+RUN chown -R 999:999 /scripts
+
 USER 999

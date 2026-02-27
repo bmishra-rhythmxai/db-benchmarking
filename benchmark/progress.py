@@ -6,6 +6,10 @@ import threading
 
 logger = logging.getLogger(__name__)
 
+WHITE = "\033[37m"
+YELLOW = "\033[33m"
+RESET = "\033[0m"
+
 
 def run_progress_logger(
     inserted_lock: threading.Lock,
@@ -37,12 +41,12 @@ def run_progress_logger(
         interval_avg_insert_ms = (interval_latency_sec / interval_total * 1000.0) if interval_total > 0 else 0.0
         cumulative_avg_insert_ms = (total_insert_latency_sec / total * 1000.0) if total > 0 else 0.0
         logger.info(
-            "Insert progress (this interval): %d total, %d original, %d duplicate, avg latency %.2f ms",
-            interval_total, interval_originals, interval_duplicates, interval_avg_insert_ms,
+            "%sInsert progress (this interval): %d total, %d original, %d duplicate, avg latency %.2f ms%s",
+            WHITE, interval_total, interval_originals, interval_duplicates, interval_avg_insert_ms, RESET,
         )
         logger.info(
-            "Insert progress (cumulative): %d total, %d original, %d duplicate, avg latency %.2f ms",
-            int(total), int(originals), int(duplicates), cumulative_avg_insert_ms,
+            "%sInsert progress (cumulative): %d total, %d original, %d duplicate, avg latency %.2f ms%s",
+            YELLOW, int(total), int(originals), int(duplicates), cumulative_avg_insert_ms, RESET,
         )
         with queries_lock:
             q = int(queries_shared[0])
@@ -54,10 +58,10 @@ def run_progress_logger(
         avg_latency_ms = (total_latency_sec / q * 1000.0) if q > 0 else 0.0
         interval_avg_ms = (interval_query_latency_sec / interval_q * 1000.0) if interval_q > 0 else 0.0
         logger.info(
-            "Query progress (this interval): %d queries, avg latency %.2f ms",
-            interval_q, interval_avg_ms,
+            "%sQuery progress (this interval): %d queries, avg latency %.2f ms%s",
+            WHITE, interval_q, interval_avg_ms, RESET,
         )
         logger.info(
-            "Query progress (cumulative): %d queries, avg latency %.2f ms",
-            q, avg_latency_ms,
+            "%sQuery progress (cumulative): %d queries, avg latency %.2f ms%s",
+            YELLOW, q, avg_latency_ms, RESET,
         )

@@ -24,11 +24,11 @@ data:
   00-postgres-tuning.sh: |
     #!/bin/bash
     set -e
-    echo "shared_buffers = 1GB" >> "$PGDATA/postgresql.conf"
-    echo "wal_buffers = 128MB" >> "$PGDATA/postgresql.conf"
-    echo "wal_compression = lz4" >> "$PGDATA/postgresql.conf"
-    echo "effective_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
-    echo "maintenance_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
+    # echo "shared_buffers = 1GB" >> "$PGDATA/postgresql.conf"
+    # echo "wal_buffers = 128MB" >> "$PGDATA/postgresql.conf"
+    # echo "wal_compression = lz4" >> "$PGDATA/postgresql.conf"
+    # echo "effective_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
+    # echo "maintenance_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
   00-replication-settings.sh: |
     #!/bin/bash
     set -e
@@ -101,7 +101,7 @@ spec:
       - name: postgres
         # Image with perf + nmon: build from repo root with
         #   docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.13
         securityContext:
           runAsNonRoot: true
           capabilities:
@@ -193,7 +193,7 @@ spec:
         fsGroup: 999
       initContainers:
       - name: pg-basebackup
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.13
         command:
           - /bin/sh
           - -ec
@@ -218,7 +218,7 @@ spec:
       containers:
       - name: postgres
         # Same image as primary (perf + nmon): build with docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.12
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.13
         securityContext:
           runAsNonRoot: true
           capabilities:
