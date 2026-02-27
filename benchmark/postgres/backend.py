@@ -164,10 +164,10 @@ def insert_batch(conn, rows: list[tuple[str, str, str]]) -> int:
         f"ON CONFLICT (medical_record_number) DO UPDATE SET {set_clause}"
     )
     flat_values = [x for row in mapped for x in row]
-    # with conn.cursor() as cur:
-    #     cur.execute(sql, flat_values)
-    #     n = cur.rowcount
-    # conn.commit()
+    with conn.cursor() as cur:
+        cur.execute(sql, flat_values)
+        n = cur.rowcount
+    conn.commit()
     return len(rows)
 
 

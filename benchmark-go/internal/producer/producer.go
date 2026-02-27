@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/patientgen"
-	"github.com/db-benchmarking/internal/runner"
 )
 
 const patientMessageType = "PATIENT"
@@ -18,13 +18,13 @@ const defaultDuplicateRatio = 0.25
 func Run(
 	durationSec float64,
 	patientCount int,
-	insertionQueue chan *runner.Record,
+	insertionQueue chan *model.Record,
 	targetRPS int,
 	patientStart int,
 	numSentinels int,
 	wg *sync.WaitGroup,
 ) {
-	put := func(rec *runner.Record) {
+	put := func(rec *model.Record) {
 		if wg != nil {
 			wg.Add(1)
 		}
@@ -56,7 +56,7 @@ func Run(
 		p := patientRecords[0]
 		patientRecords = patientRecords[1:]
 		jsonMsg, _ := p.ToJSON()
-		rec := &runner.Record{
+		rec := &model.Record{
 			PatientID:   p.PatientID,
 			MessageType: patientMessageType,
 			JSONMessage: jsonMsg,
@@ -75,5 +75,5 @@ func Run(
 }
 
 func init() {
-	_ = json.Marshal(patientgen.PatientRecord{})
+	_, _ = json.Marshal(patientgen.PatientRecord{})
 }

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/progress"
-	"github.com/db-benchmarking/internal/runner"
 )
 
 const getPollSec = 5 * time.Millisecond
@@ -26,7 +26,7 @@ type InsertBackend interface {
 	InsertBatch(conn interface{}, rows []RowForDB) (int, error)
 }
 
-func mrnsFromBatch(batch []*runner.Record) []string {
+func mrnsFromBatch(batch []*model.Record) []string {
 	var mrns []string
 	for _, rec := range batch {
 		if rec == nil {
@@ -52,8 +52,8 @@ func mrnsFromBatch(batch []*runner.Record) []string {
 // Stops when it receives nil (*Record). If wg is non-nil, Done() is called after processing each item (queue drain).
 func RunInsertWorker(
 	backend InsertBackend,
-	insertionQueue <-chan *runner.Record,
-	queryQueue chan *runner.QueryJob,
+	insertionQueue <-chan *model.Record,
+	queryQueue chan *model.QueryJob,
 	insertedMu *sync.Mutex,
 	inserted *progress.InsertedStats,
 	batchSize int,
@@ -61,7 +61,7 @@ func RunInsertWorker(
 	queriesPerRecord int,
 	wg *sync.WaitGroup,
 ) {
-	var batch []*runner.Record
+	var batch []*model.Record
 	batchStart := time.Now()
 	for {
 		batchElapsed := time.Since(batchStart).Seconds()
@@ -105,8 +105,8 @@ func RunInsertWorker(
 
 func flush(
 	backend InsertBackend,
-	batch []*runner.Record,
-	queryQueue chan *runner.QueryJob,
+	batch []*model.Record,
+	queryQueue chan *model.QueryJob,
 	insertedMu *sync.Mutex,
 	inserted *progress.InsertedStats,
 	queriesPerRecord int,
@@ -143,7 +143,7 @@ func flush(
 	if queriesPerRecord > 0 {
 		insertTime := time.Now()
 		for _, mrn := range mrnsFromBatch(batch) {
-			queryQueue <- &runner.QueryJob{MRN: mrn, InsertTime: insertTime}
+			queryQueue <- &model.QueryJob{MRN: mrn, InsertTime: insertTime}
 		}
 	}
 }

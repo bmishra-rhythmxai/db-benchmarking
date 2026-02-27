@@ -164,7 +164,7 @@ spec:
         resources:
           requests:
             storage: 10Ti
-        storageClassName: managed-csi-premiumv2-3k-400
+        storageClassName: managed-csi-premiumv2-10k-1200
     - name: ch-log
       spec:
         accessModes:
@@ -172,4 +172,4 @@ spec:
         resources:
           requests:
             storage: 10Ti
-        storageClassName: managed-csi-premiumv2-3k-400
+        storageClassName: managed-csi-premiumv2-10k-1200

@@ -1,4 +1,4 @@
-package runner
+package model
 
 // Record is (patient_id, message_type, json_message, is_original).
 type Record struct {
@@ -9,4 +9,3 @@ type Record struct {
 }
 
 // InsertionSentinel: pass nil *Record to signal end of insertion stream.
-

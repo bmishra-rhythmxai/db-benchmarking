@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/producer"
 	"github.com/db-benchmarking/internal/progress"
 	"github.com/db-benchmarking/internal/worker"
@@ -16,7 +17,7 @@ type WorkerCtx interface {
 	Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 	Teardown()
 	GetMaxPatientCounter() (int, error)
-	RunQueryWorker(queryQueue <-chan *QueryJob, queriesMu *sync.Mutex, queries *progress.QueryStats, queriesPerRecord int, queryDelaySec float64)
+	RunQueryWorker(queryQueue <-chan *model.QueryJob, queriesMu *sync.Mutex, queries *progress.QueryStats, queriesPerRecord int, queryDelaySec float64)
 }
 
 // RunLoad runs the full load: producers, insert workers, query workers, progress logger.
@@ -33,10 +34,10 @@ func RunLoad(
 	producerThreads int,
 	ctx WorkerCtx,
 ) {
-	insertionQueueMax := max(workers*8, batchSize*workers*2, targetRPS*4)
-	queryQueueMax := max(workers*4, batchSize*workers*4, targetRPS*4)
-	insertionQueue := make(chan *Record, insertionQueueMax)
-	queryQueue := make(chan *QueryJob, queryQueueMax)
+	insertionQueueMax := max3(workers*8, batchSize*workers*2, targetRPS*4)
+	queryQueueMax := max3(workers*4, batchSize*workers*4, targetRPS*4)
+	insertionQueue := make(chan *model.Record, insertionQueueMax)
+	queryQueue := make(chan *model.QueryJob, queryQueueMax)
 
 	var insertedMu sync.Mutex
 	inserted := &progress.InsertedStats{}
@@ -154,7 +155,7 @@ func RunLoad(
 	}
 }
 
-func max(a, b, c int) int {
+func max3(a, b, c int) int {
 	if b > a {
 		a = b
 	}

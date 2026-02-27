@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/progress"
-	"github.com/db-benchmarking/internal/runner"
 	"github.com/db-benchmarking/internal/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -53,7 +53,7 @@ type Context struct {
 }
 
 // Setup creates pool, prewarms, and inits schema.
-func (c *Context) Setup(numWorkers, targetRPS int) (*Backend, error) {
+func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error) {
 	if c.pool != nil {
 		log.Fatal("postgres Setup already called")
 	}
@@ -103,7 +103,7 @@ func (c *Context) GetMaxPatientCounter() (int, error) {
 
 // RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, updates queries stats.
 func (c *Context) RunQueryWorker(
-	queryQueue <-chan *runner.QueryJob,
+	queryQueue <-chan *model.QueryJob,
 	queriesMu *sync.Mutex,
 	queries *progress.QueryStats,
 	queriesPerRecord int,

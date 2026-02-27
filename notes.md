@@ -23,8 +23,8 @@ Use a distinct StorageClass per performance tier (Premium SSD v2). Set your PVC'
 
 nmon -f -s1 -c120
 
-python3 system_monitor.py --no-disk
-python3 system_monitor.py --no-cpu --no-mem --no-net
+python3 /scripts/system_monitor.py --no-disk
+python3 /scripts/system_monitor.py --no-cpu --no-mem --no-net
 
 iostat -mdx 1 | awk '
 $1=="Device" {
@@ -42,9 +42,12 @@ sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bika
 k apply -f deployments/postgres.yaml
 
 top -b -p 1 -d 1 | grep clickhouse-serv
-python main.py --database clickhouse --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
+python main.py --database clickhouse --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --process 4 --workers 5 --rows-per-second 200 --queries-per-record 2
 
-python main.py --database postgres   --duration 21600 --batch-size 20 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
+python main.py --database postgres   --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --process 4 --workers 5 --rows-per-second 200 --queries-per-record 2
+
+./loadrunner --database postgres   --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
+
 
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
@@ -53,6 +56,12 @@ docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml
 k apply -f deployments/load-runner.yaml
+
+TAG=$(~/source/az-cli/.venv/bin/az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking-go --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+docker build -f Dockerfile.k8s.go -t devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG .
+docker push devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG
+sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking-go:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking-go:${TAG}|" deployments/load-runner-go.yaml
+k apply -f deployments/load-runner-go.yaml
 
 -- drop table hl7_messages on cluster default sync
 -- drop table hl7_messages_local sync

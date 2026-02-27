@@ -57,8 +57,8 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Ti
-  storageClassName: managed-csi-premiumv2-10k-1000
+      storage: 20Ti
+  storageClassName: managed-csi-ultra-20k-3000
 ---
 # Primary (writer): accepts writes and streams WAL to replicas
 apiVersion: apps/v1
@@ -78,6 +78,11 @@ spec:
       labels:
         app: postgres-primary
     spec:
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: ultra
+        effect: NoSchedule
       securityContext:
         runAsUser: 999
         fsGroup: 999
@@ -101,7 +106,7 @@ spec:
       - name: postgres
         # Image with perf + nmon: build from repo root with
         #   docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.13
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.14
         securityContext:
           runAsNonRoot: true
           capabilities:
@@ -139,11 +144,11 @@ spec:
               key: REPLICATION_PASSWORD
         resources:
           requests:
-            cpu: 4
-            memory: 8Gi
+            cpu: 8
+            memory: 16Gi
           limits:
-            cpu: 4
-            memory: 8Gi
+            cpu: 8
+            memory: 16Gi
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data
@@ -188,12 +193,17 @@ spec:
       labels:
         app: postgres-replica
     spec:
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: ultra
+        effect: NoSchedule
       securityContext:
         runAsUser: 999
         fsGroup: 999
       initContainers:
       - name: pg-basebackup
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.13
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.14
         command:
           - /bin/sh
           - -ec
@@ -218,7 +228,7 @@ spec:
       containers:
       - name: postgres
         # Same image as primary (perf + nmon): build with docker build -f Dockerfile.postgres -t postgres-perf:16 .
-        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.13
+        image: devgwrxacr.azurecr.io/bikash/postgres:v0.0.14
         securityContext:
           runAsNonRoot: true
           capabilities:
@@ -234,11 +244,11 @@ spec:
           value: /var/lib/postgresql/data
         resources:
           requests:
-            cpu: 4
-            memory: 8Gi
+            cpu: 6
+            memory: 12Gi
           limits:
-            cpu: 4
-            memory: 8Gi
+            cpu: 6
+            memory: 12Gi
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data

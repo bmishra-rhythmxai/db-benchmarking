@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+
 """
 HL7 messages load benchmark: PostgreSQL or ClickHouse at 1000 inserts/sec.
 Uses dynamic patient generation and in-memory sample messages.

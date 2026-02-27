@@ -8,6 +8,7 @@ RUN apt-get update \
         ca-certificates \
         sudo \
         sysstat \
+        python3 \
     && rm -rf /var/lib/apt/lists/* \
     && echo 'postgres ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/postgres \
     && chmod 440 /etc/sudoers.d/postgres

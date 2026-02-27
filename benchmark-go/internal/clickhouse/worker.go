@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/progress"
-	"github.com/db-benchmarking/internal/runner"
 	"github.com/db-benchmarking/internal/worker"
 )
 
@@ -49,7 +49,7 @@ type Context struct {
 }
 
 // Setup creates the pool, prewarms, and inits schema.
-func (c *Context) Setup(numWorkers, targetRPS int) (*Backend, error) {
+func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error) {
 	if c.ch != nil {
 		log.Fatal("clickhouse Setup already called")
 	}
@@ -101,7 +101,7 @@ func (c *Context) GetMaxPatientCounter() (int, error) {
 
 // RunQueryWorker consumes from queryQueue and runs queries.
 func (c *Context) RunQueryWorker(
-	queryQueue <-chan *runner.QueryJob,
+	queryQueue <-chan *model.QueryJob,
 	queriesMu *sync.Mutex,
 	queries *progress.QueryStats,
 	queriesPerRecord int,

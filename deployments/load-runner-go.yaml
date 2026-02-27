@@ -12,7 +12,7 @@ metadata:
   labels:
     app: load-runner-go
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: load-runner-go
@@ -23,16 +23,16 @@ spec:
     spec:
       containers:
       - name: load-runner-go
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-go:v0.0.1
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-go:v0.0.2
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:
           requests:
-            cpu: 4
-            memory: 8Gi
+            cpu: 10
+            memory: 10Gi
           limits:
-            cpu: 4
-            memory: 8Gi
+            cpu: 10
+            memory: 10Gi
         env:
         - name: CLICKHOUSE_HOST
           value: chi-clickhouse-dev-cluster-0-0
