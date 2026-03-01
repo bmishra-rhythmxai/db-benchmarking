@@ -129,6 +129,17 @@ def init_schema(conn) -> None:
             -- Ensure source uses LZ4 compression (for existing tables)
             ALTER TABLE hl7_messages ALTER COLUMN source SET COMPRESSION lz4;
         """)
+        # Citus: distribute table by medical_record_number when running on coordinator
+        cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'citus'")
+        if cur.fetchone():
+            cur.execute("SELECT 1 FROM citus_tables WHERE tablename = 'hl7_messages'")
+            if not cur.fetchone():
+                cur.execute(
+                    "SELECT create_distributed_table('hl7_messages', 'medical_record_number')"
+                )
+                logger.info(
+                    "Citus: distributed hl7_messages by medical_record_number"
+                )
     conn.commit()
     logger.info("Table hl7_messages created (PostgreSQL)")
 

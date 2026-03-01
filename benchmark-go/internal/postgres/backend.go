@@ -3,12 +3,14 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strconv"
 	"time"
 
 	"github.com/db-benchmarking/internal/config"
 	"github.com/db-benchmarking/internal/worker"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -102,12 +104,25 @@ func PrewarmPool(ctx context.Context, pool *pgxpool.Pool, size int) error {
 }
 
 // InitSchema creates hl7_messages table if not exists.
+// When running on a Citus coordinator, distributes the table by medical_record_number.
 func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	_, err := pool.Exec(ctx, createTableSQL)
 	if err != nil {
 		return err
 	}
 	log.Println("Table hl7_messages created (PostgreSQL)")
+	// Citus: distribute by medical_record_number when extension is present
+	_, errDist := pool.Exec(ctx, "SELECT create_distributed_table('hl7_messages', 'medical_record_number')")
+	if errDist != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(errDist, &pgErr) && pgErr.Code == "42883" {
+			// undefined_function — Citus not installed, skip
+		} else {
+			log.Printf("Citus create_distributed_table: %v", errDist)
+		}
+	} else {
+		log.Println("Citus: distributed hl7_messages by medical_record_number")
+	}
 	return nil
 }
 

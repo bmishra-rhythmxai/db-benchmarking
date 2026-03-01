@@ -1,0 +1,400 @@
+# Citus sharded PostgreSQL cluster for hl7_messages benchmark.
+# - Coordinator: citus-coordinator (single node; clients connect here for reads/writes).
+# - Workers: citus-worker-0, citus-worker-1, ... (StatefulSet; store sharded data).
+#
+# Deploy:
+#   kubectl apply -f deployments/citus.yaml
+#   kubectl wait --for=condition=ready pod -l app=citus-coordinator -n clickhouse --timeout=300s
+#   kubectl wait --for=condition=ready pod -l app=citus-worker -n clickhouse --timeout=300s
+# The citus-add-workers Job will retry until coordinator and workers are up, then register workers.
+# To re-run after scaling workers: kubectl delete job citus-add-workers -n clickhouse; kubectl apply -f deployments/citus.yaml
+#
+# Benchmark: set POSTGRES_HOST=citus (or citus-coordinator) in load-runner to use this cluster.
+# Worker count: StatefulSet replicas (default 3) must match the loop in the add-workers Job (0 1 2); update both if you scale.
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: citus-credentials
+  namespace: clickhouse
+type: Opaque
+stringData:
+  POSTGRES_USER: default
+  POSTGRES_PASSWORD: strongpassword
+  POSTGRES_DB: default
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: citus-coordinator-init
+  namespace: clickhouse
+data:
+  00-postgres-tuning.sh: |
+    #!/bin/bash
+    set -e
+    cat >> "$PGDATA/postgresql.conf" << 'EOF'
+    shared_buffers = 8GB
+    wal_buffers = 1GB
+    max_wal_size = 32GB
+    listen_addresses = '*'
+    EOF
+  01-pg-hba.sh: |
+    #!/bin/bash
+    set -e
+    cat >> "$PGDATA/pg_hba.conf" << 'EOF'
+    host all all 0.0.0.0/0 scram-sha-256
+    host all all ::0/0 scram-sha-256
+    EOF
+  02-citus-extension.sql: |
+    CREATE EXTENSION IF NOT EXISTS citus;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: citus-worker-init
+  namespace: clickhouse
+data:
+  00-postgres-tuning.sh: |
+    #!/bin/bash
+    set -e
+    cat >> "$PGDATA/postgresql.conf" << 'EOF'
+    shared_buffers = 4GB
+    listen_addresses = '*'
+    EOF
+  01-pg-hba.sh: |
+    #!/bin/bash
+    set -e
+    cat >> "$PGDATA/pg_hba.conf" << 'EOF'
+    host all all 0.0.0.0/0 scram-sha-256
+    host all all ::0/0 scram-sha-256
+    EOF
+  02-citus-extension.sql: |
+    CREATE EXTENSION IF NOT EXISTS citus;
+---
+# Coordinator PVC
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: citus-coordinator-data
+  namespace: clickhouse
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: managed-csi-premiumv2-10k-1200
+---
+# Coordinator: single node; clients connect here
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: citus-coordinator
+  namespace: clickhouse
+  labels:
+    app: citus-coordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: citus-coordinator
+  template:
+    metadata:
+      labels:
+        app: citus-coordinator
+    spec:
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: ultra
+        effect: NoSchedule
+      nodeSelector:
+        workload: ultra
+      securityContext:
+        runAsUser: 999
+        fsGroup: 999
+      initContainers:
+      - name: fix-data-dir
+        image: busybox:1.36
+        command:
+          - /bin/sh
+          - -ec
+          - |
+            mkdir -p /var/lib/postgresql/data/pgdata
+            chown 999:999 /var/lib/postgresql/data/pgdata
+            chmod 0700 /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+      containers:
+      - name: postgres
+        image: citusdata/citus:postgres_17
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_DB
+        resources:
+          requests:
+            cpu: 4
+            memory: 8Gi
+          limits:
+            cpu: 4
+            memory: 8Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: citus-coordinator-data
+      - name: init-scripts
+        configMap:
+          name: citus-coordinator-init
+          defaultMode: 0755
+---
+# Workers: StatefulSet for stable DNS (citus-worker-0.citus-workers, ...)
+apiVersion: v1
+kind: Service
+metadata:
+  name: citus-workers
+  namespace: clickhouse
+  labels:
+    app: citus-worker
+spec:
+  clusterIP: None
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: citus-worker
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: citus-workers
+  namespace: clickhouse
+  labels:
+    app: citus-worker
+spec:
+  serviceName: citus-workers
+  replicas: 3
+  selector:
+    matchLabels:
+      app: citus-worker
+  template:
+    metadata:
+      labels:
+        app: citus-worker
+    spec:
+      tolerations:
+      - key: workload
+        operator: Equal
+        value: ultra
+        effect: NoSchedule
+      nodeSelector:
+        workload: ultra
+      securityContext:
+        runAsUser: 999
+        fsGroup: 999
+      initContainers:
+      - name: fix-data-dir
+        image: busybox:1.36
+        command:
+          - /bin/sh
+          - -ec
+          - |
+            mkdir -p /var/lib/postgresql/data/pgdata
+            chown 999:999 /var/lib/postgresql/data/pgdata
+            chmod 0700 /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        securityContext:
+          runAsUser: 0
+          runAsNonRoot: false
+      containers:
+      - name: postgres
+        image: citusdata/citus:postgres_17
+        ports:
+        - containerPort: 5432
+          name: postgres
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_PASSWORD
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_DB
+        resources:
+          requests:
+            cpu: 2
+            memory: 4Gi
+          limits:
+            cpu: 2
+            memory: 4Gi
+        volumeMounts:
+        - name: data
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        livenessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 15
+          periodSeconds: 10
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command: ["pg_isready", "-U", "default", "-d", "default"]
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+      volumes:
+      - name: init-scripts
+        configMap:
+          name: citus-worker-init
+          defaultMode: 0755
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 500Gi
+      storageClassName: managed-csi-premiumv2-10k-1200
+---
+# Client-facing service: point to coordinator (use POSTGRES_HOST=citus for load-runner)
+apiVersion: v1
+kind: Service
+metadata:
+  name: citus
+  namespace: clickhouse
+  labels:
+    app: citus-coordinator
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: citus-coordinator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: citus-coordinator
+  namespace: clickhouse
+  labels:
+    app: citus-coordinator
+spec:
+  ports:
+  - port: 5432
+    targetPort: 5432
+    name: postgres
+  selector:
+    app: citus-coordinator
+---
+# Job to register workers with the coordinator (retries until coordinator and workers are ready).
+# Re-run after scaling workers: delete the job and re-apply this file; update the for-loop below to match worker count.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: citus-add-workers
+  namespace: clickhouse
+  labels:
+    app: citus-add-workers
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 30
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: add-workers
+        image: citusdata/citus:postgres_17
+        command:
+        - /bin/bash
+        - -ec
+        - |
+          set -e
+          COORD=citus-coordinator.clickhouse.svc.cluster.local
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+          # Wait for coordinator
+          until pg_isready -h citus-coordinator -p 5432 -U default -d default; do echo "waiting for coordinator..."; sleep 3; done
+          # Set coordinator host (for metadata)
+          psql -h citus-coordinator -p 5432 -U default -d default -v ON_ERROR_STOP=1 -c \
+            "SELECT citus_set_coordinator_host('citus-coordinator.clickhouse.svc.cluster.local', 5432);" || true
+          # Add each worker (idempotent: ignore duplicate node errors)
+          for i in 0 1 2; do
+            host="citus-worker-${i}.citus-workers.clickhouse.svc.cluster.local"
+            until pg_isready -h "citus-worker-${i}.citus-workers" -p 5432 -U default -d default 2>/dev/null; do echo "waiting for ${host}..."; sleep 3; done
+            psql -h citus-coordinator -p 5432 -U default -d default -v ON_ERROR_STOP=0 -c \
+              "SELECT * FROM citus_add_node('${host}', 5432);" || true
+          done
+          echo "Workers registered. Active workers:"
+          psql -h citus-coordinator -p 5432 -U default -d default -c "SELECT * FROM citus_get_active_worker_nodes();"
+        env:
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_PASSWORD
+        - name: PGPASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: citus-credentials
+              key: POSTGRES_PASSWORD
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi

@@ -41,13 +41,11 @@ docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bikash/postgres:${TAG}|" deployments/postgres.yaml
 k apply -f deployments/postgres.yaml
 
-top -b -p 1 -d 1 | grep clickhouse-serv
 python main.py --database clickhouse --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --process 4 --workers 5 --rows-per-second 200 --queries-per-record 2
-
 python main.py --database postgres   --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --process 4 --workers 5 --rows-per-second 200 --queries-per-record 2
 
-./loadrunner --database clickhouse --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
-./loadrunner --database postgres   --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
+./loadrunner --database clickhouse --duration 3600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
+./loadrunner --database postgres   --duration 3600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
 
 
 

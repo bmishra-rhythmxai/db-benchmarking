@@ -35,6 +35,6 @@ spec:
             memory: 8Gi
         env:
         - name: CLICKHOUSE_HOST
-          value: chi-clickhouse-dev-cluster-0-0
+          value: clickhouse-clickhouse
         - name: POSTGRES_HOST
           value: postgres
