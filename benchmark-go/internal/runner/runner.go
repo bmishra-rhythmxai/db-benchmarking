@@ -17,7 +17,7 @@ type WorkerCtx interface {
 	Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 	Teardown()
 	GetMaxPatientCounter() (int, error)
-	RunQueryWorker(queryQueue <-chan *model.QueryJob, queriesMu *sync.Mutex, queries *progress.QueryStats, queriesPerRecord int, queryDelaySec float64)
+	RunQueryWorker(queryQueue <-chan *model.QueryJob, queriesMu *sync.Mutex, queries *progress.QueryStats, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
 }
 
 // RunLoad runs the full load: producers, insert workers, query workers, progress logger.
@@ -32,6 +32,7 @@ func RunLoad(
 	queriesPerRecord int,
 	queryDelaySec float64,
 	producerThreads int,
+	ignoreSelectErrors bool,
 	ctx WorkerCtx,
 ) {
 	insertionQueueMax := max3(workers*8, batchSize*workers*2, targetRPS*4)
@@ -74,7 +75,7 @@ func RunLoad(
 			queryWorkersWg.Add(1)
 			go func() {
 				defer queryWorkersWg.Done()
-				ctx.RunQueryWorker(queryQueue, &queriesMu, queries, queriesPerRecord, queryDelaySec)
+				ctx.RunQueryWorker(queryQueue, &queriesMu, queries, queriesPerRecord, queryDelaySec, ignoreSelectErrors)
 			}()
 		}
 	}
@@ -126,6 +127,7 @@ func RunLoad(
 	queriesMu.Lock()
 	queriesFinal := int(queries.Count)
 	totalQueryLatency := queries.TotalLatencySec
+	queriesFailed := int(queries.FailedCount)
 	queriesMu.Unlock()
 
 	actualRPS := 0.0
@@ -151,7 +153,7 @@ func RunLoad(
 		log.Printf("Insert latency: avg %.2f ms/row", avgInsertMs)
 	}
 	if queriesFinal > 0 {
-		log.Printf("Queries: %d executed (avg latency %.2f ms)", queriesFinal, avgQueryMs)
+		log.Printf("Queries: %d executed, %d failed (avg latency %.2f ms)", queriesFinal, queriesFailed, avgQueryMs)
 	}
 }
 

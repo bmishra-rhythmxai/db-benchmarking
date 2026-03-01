@@ -3,7 +3,7 @@
 Print dstat-like system monitoring statistics from /proc, /sys and cgroups.
 Columnar format with human-readable sizes. CPU in cores, memory tot/vsz/rss.
 Runnable in containers; reads cgroup v1/v2 when available.
-Requires Linux (/proc, /sys). Use --block and --net to filter devices.
+Requires Linux (/proc, /sys). Use --block and --net to filter devices; use --no-block to exclude devices.
 """
 
 from __future__ import annotations
@@ -416,7 +416,10 @@ def _read_dev_t(path: Path) -> int | None:
         return None
 
 
-def get_block_device_sizes(block_filter: list[str] | None) -> list[tuple[str, int, int | None, int | None]]:
+def get_block_device_sizes(
+    block_filter: list[str] | None,
+    block_exclude: list[str] | None = None,
+) -> list[tuple[str, int, int | None, int | None]]:
     """(name, total_bytes, used_bytes|None, free_bytes|None). Used/free from mounts by device number."""
     result: list[tuple[str, int, int | None, int | None]] = []
     sys_block = Path("/sys/block")
@@ -449,6 +452,8 @@ def get_block_device_sizes(block_filter: list[str] | None) -> list[tuple[str, in
             continue
         name = dev_dir.name
         if block_filter is not None and name not in block_filter:
+            continue
+        if block_exclude and name in block_exclude:
             continue
         size_path = dev_dir / "size"
         try:
@@ -519,6 +524,7 @@ def print_metrics_sources_summary(
     no_disk: bool,
     no_net: bool,
     block_filter: list[str] | None,
+    block_exclude: list[str] | None,
     net_filter: list[str] | None,
 ) -> None:
     """Print a one-time summary of which metrics come from which sources."""
@@ -552,6 +558,8 @@ def print_metrics_sources_summary(
         lines.append("        /sys/block (size); /proc/mounts (used/free per device) → tot, used, free")
         if block_filter:
             lines.append(f"        (filter: {', '.join(block_filter)})")
+        if block_exclude:
+            lines.append(f"        (exclude: {', '.join(block_exclude)})")
     if not no_net:
         lines.append("  Network: /proc/net/dev (rx_bytes, tx_bytes) → in, out per interface")
         if net_filter:
@@ -589,6 +597,7 @@ def main() -> None:
         description="Print dstat-like stats from /proc, /sys and cgroups (columnar, human-readable).",
     )
     ap.add_argument("--block", type=str, default=None, help="Comma-separated block device filter (e.g. sda,sdb)")
+    ap.add_argument("--no-block", type=str, default=None, dest="no_block", help="Comma-separated block devices to exclude (e.g. loop0,sr0)")
     ap.add_argument("--net", type=str, default=None, help="Comma-separated network interface filter (e.g. eth0)")
     ap.add_argument("--interval", "-n", type=float, default=1, help="Refresh every N seconds (0 = single shot)")
     ap.add_argument("--repeat-header", type=int, default=24, help="Repeat header rows every N data lines (0 = never)")
@@ -599,6 +608,7 @@ def main() -> None:
     ap.add_argument("--debug", action="store_true", help="Print metrics sources summary before continuous output")
     args = ap.parse_args()
     block_filter: list[str] | None = [x.strip() for x in args.block.split(",")] if args.block else None
+    block_exclude: list[str] | None = [x.strip() for x in args.no_block.split(",")] if args.no_block else None
     net_filter: list[str] | None = [x.strip() for x in args.net.split(",")] if args.net else None
 
     # Prefer cgroup path from /proc/1/cgroup so we read the real container cgroup in privileged containers
@@ -622,6 +632,7 @@ def main() -> None:
             no_disk=args.no_disk,
             no_net=args.no_net,
             block_filter=block_filter,
+            block_exclude=block_exclude,
             net_filter=net_filter,
         )
 
@@ -683,6 +694,8 @@ def main() -> None:
                     continue
                 if block_filter is not None and name not in block_filter:
                     continue
+                if block_exclude and name in block_exclude:
+                    continue
                 a = d1[name]
                 b = d2[name]
                 disk_deltas[name] = (
@@ -698,7 +711,7 @@ def main() -> None:
                 net_deltas[name] = (n2[name][0] - n1[name][0], n2[name][1] - n1[name][1])
 
         # Block device sizes
-        block_sizes = get_block_device_sizes(block_filter)
+        block_sizes = get_block_device_sizes(block_filter, block_exclude)
 
         # Build table: (main_header, [(sub_header, value), ...]) with date/time first
         now = time.localtime()

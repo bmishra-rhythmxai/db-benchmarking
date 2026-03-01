@@ -72,7 +72,7 @@ func InitSchema(ctx context.Context, conn driver.Conn) error {
 		GENDER_IDENTITY Nullable(String), FHIR_GENDER_IDENTITY Nullable(String), MARITAL_STATUS Nullable(String), FHIR_MARITAL_STATUS Nullable(String),
 		RACE_DISPLAY Nullable(String), FHIR_RACE_DISPLAY Nullable(String), ETHNICITY_DISPLAY Nullable(String), FHIR_ETHNICITY_DISPLAY Nullable(String),
 		SEX_AT_BIRTH Nullable(String), IS_PREGNANT Nullable(String)
-	) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/01/hl7_messages_local', '{replica}', UPDATED_AT)
+	) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/hl7_messages_local', '{replica}', UPDATED_AT)
 	ORDER BY MEDICAL_RECORD_NUMBER SETTINGS storage_policy = '` + policy + `'`
 	if err := conn.Exec(ctx, localSQL); err != nil {
 		return err
@@ -86,7 +86,7 @@ func InitSchema(ctx context.Context, conn driver.Conn) error {
 		GENDER_IDENTITY Nullable(String), FHIR_GENDER_IDENTITY Nullable(String), MARITAL_STATUS Nullable(String), FHIR_MARITAL_STATUS Nullable(String),
 		RACE_DISPLAY Nullable(String), FHIR_RACE_DISPLAY Nullable(String), ETHNICITY_DISPLAY Nullable(String), FHIR_ETHNICITY_DISPLAY Nullable(String),
 		SEX_AT_BIRTH Nullable(String), IS_PREGNANT Nullable(String)
-	) ENGINE = Distributed('` + cluster + `', '` + db + `', hl7_messages_local, rand())`
+	) ENGINE = Distributed('` + cluster + `', '` + db + `', hl7_messages_local, sipHash64(MEDICAL_RECORD_NUMBER))`
 	if err := conn.Exec(ctx, distSQL); err != nil {
 		return err
 	}
@@ -135,7 +135,13 @@ func InsertBatch(ctx context.Context, conn driver.Conn, rows []worker.RowForDB) 
 	now := time.Now().UTC()
 	// PrepareBatch expects "INSERT INTO table"; Append() adds rows in table column order.
 	insertSQL := `INSERT INTO ` + config.DBName + `.hl7_messages`
-	batch, err := conn.PrepareBatch(ctx, insertSQL)
+	insertCtx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
+		"insert_quorum":                   "2", // 2 replicas per shard → quorum 2
+		"insert_quorum_parallel":          "1", // wait for quorum on each replica sequentially
+		"distributed_foreground_insert":   "1", // insert to distributed table in foreground
+		"async_insert":                    "0", // sync insert: wait for write to complete
+	}))
+	batch, err := conn.PrepareBatch(insertCtx, insertSQL)
 	if err != nil {
 		return 0, err
 	}
@@ -158,7 +164,11 @@ func InsertBatch(ctx context.Context, conn driver.Conn, rows []worker.RowForDB) 
 
 // QueryByPrimaryKey returns row count for the given MRN (FINAL).
 func QueryByPrimaryKey(ctx context.Context, conn driver.Conn, mrn string) (int, error) {
-	row := conn.QueryRow(ctx, "SELECT count() FROM "+config.DBName+".hl7_messages FINAL WHERE MEDICAL_RECORD_NUMBER = $1", mrn)
+	queryCtx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
+		"select_sequential_consistency": "1",
+		"prefer_localhost_replica":      "0",
+	}))
+	row := conn.QueryRow(queryCtx, "SELECT count() FROM "+config.DBName+".hl7_messages FINAL WHERE MEDICAL_RECORD_NUMBER = $1", mrn)
 	var n uint64
 	if err := row.Scan(&n); err != nil {
 		return 0, err
@@ -168,7 +178,11 @@ func QueryByPrimaryKey(ctx context.Context, conn driver.Conn, mrn string) (int, 
 
 // GetMaxPatientCounter returns max patient ordinal from PATIENT_ID, or -1.
 func GetMaxPatientCounter(ctx context.Context, conn driver.Conn) (int, error) {
-	row := conn.QueryRow(ctx, "SELECT COALESCE(MAX(toInt64OrZero(substring(PATIENT_ID, 10))), -1) FROM "+config.DBName+".hl7_messages WHERE PATIENT_ID != ''")
+	queryCtx := clickhouse.Context(ctx, clickhouse.WithSettings(clickhouse.Settings{
+		"select_sequential_consistency": "1",
+		"prefer_localhost_replica":      "0",
+	}))
+	row := conn.QueryRow(queryCtx, "SELECT COALESCE(MAX(toInt64OrZero(substring(PATIENT_ID, 10))), -1) FROM "+config.DBName+".hl7_messages WHERE PATIENT_ID != ''")
 	var n int64
 	if err := row.Scan(&n); err != nil {
 		return -1, err

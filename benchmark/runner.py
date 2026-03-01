@@ -70,6 +70,7 @@ def run_load(
     progress_queue: Any = None,
     process_index: int | None = None,
     start_barrier: Any = None,
+    ignore_select_errors: bool = False,
 ) -> None:
     num_workers = workers
     # Queue must hold enough for workers to fill batches without producer blocking; otherwise
@@ -84,7 +85,7 @@ def run_load(
     inserted_lock = threading.Lock()
     inserted_shared: list[float] = [0, 0, 0, 0.0]  # [total, originals, duplicates, total_insert_latency_sec]
     queries_lock = threading.Lock()
-    queries_shared: list[float] = [0, 0.0]  # [count, total_latency_sec]
+    queries_shared: list[float] = [0, 0.0, 0.0]  # [count, total_latency_sec, failed_count]
     progress_stop = threading.Event()
     run_start = time.perf_counter()
 
@@ -106,7 +107,7 @@ def run_load(
         insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, batch_wait_sec, queries_per_record
     )
     query_worker_run = worker_ctx.make_query_worker(
-        query_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec
+        query_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec, ignore_select_errors
     )
     run_query_workers = queries_per_record > 0
 
@@ -207,8 +208,8 @@ def run_load(
         with inserted_lock:
             ins = (inserted_shared[0], inserted_shared[1], inserted_shared[2], inserted_shared[3])
         with queries_lock:
-            q = (queries_shared[0], queries_shared[1])
-        progress_queue.put((process_index, (*ins, q[0], q[1])))
+            q = (queries_shared[0], queries_shared[1], queries_shared[2])
+        progress_queue.put((process_index, (*ins, q[0], q[1], q[2])))
     progress_thread.join(timeout=1.0)
 
     for w in insert_worker_threads:
@@ -229,6 +230,7 @@ def run_load(
     total_insert_latency_sec = inserted_shared[3]
     queries_final = int(queries_shared[0])
     total_query_latency_sec = queries_shared[1]
+    queries_failed_final = int(queries_shared[2])
     elapsed = run_end - run_start
     actual_rps = total_inserted_final / elapsed if elapsed > 0 else 0
     avg_insert_latency_ms = (total_insert_latency_sec / total_inserted_final * 1000.0) if total_inserted_final > 0 else 0.0
@@ -245,4 +247,4 @@ def run_load(
     if total_inserted_final > 0:
         print(f"Insert latency: avg {avg_insert_latency_ms:.2f} ms/row")
     if queries_final > 0:
-        print(f"Queries: {queries_final} executed (avg latency {avg_query_latency_ms:.2f} ms)")
+        print(f"Queries: {queries_final} executed, {queries_failed_final} failed (avg latency {avg_query_latency_ms:.2f} ms)")

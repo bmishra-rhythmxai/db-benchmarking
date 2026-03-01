@@ -24,6 +24,7 @@ func Run(
 	var prevInserted InsertedStats
 	var prevQueries float64
 	var prevQueryLatency float64
+	var prevFailed float64
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -41,6 +42,7 @@ func Run(
 		queriesMu.Lock()
 		q := queries.Count
 		totalQueryLatency := queries.TotalLatencySec
+		failed := queries.FailedCount
 		queriesMu.Unlock()
 
 		intervalTotal := int(total - prevInserted.Total)
@@ -59,8 +61,10 @@ func Run(
 		}
 		intervalQ := int(q - prevQueries)
 		intervalQueryLatency := totalQueryLatency - prevQueryLatency
+		intervalFailed := int(failed - prevFailed)
 		prevQueries = q
 		prevQueryLatency = totalQueryLatency
+		prevFailed = failed
 		avgLatencyMs := 0.0
 		if q > 0 {
 			avgLatencyMs = totalQueryLatency / q * 1000
@@ -73,11 +77,11 @@ func Run(
 		log.Println("---")
 		log.Printf("Insert progress (this interval): %d total, %d original, %d duplicate, avg latency %.2f ms",
 			intervalTotal, intervalOriginals, intervalDuplicates, intervalAvgInsertMs)
-		log.Printf("Query progress (this interval): %d queries, avg latency %.2f ms", intervalQ, intervalAvgMs)
+		log.Printf("Query progress (this interval): %d queries, %d failed, avg latency %.2f ms", intervalQ, intervalFailed, intervalAvgMs)
 		log.Println("---")
 		log.Printf("Insert progress (cumulative): %d total, %d original, %d duplicate, avg latency %.2f ms",
 			int(total), int(originals), int(duplicates), cumulativeAvgInsertMs)
-		log.Printf("Query progress (cumulative): %.0f queries, avg latency %.2f ms", q, avgLatencyMs)
+		log.Printf("Query progress (cumulative): %.0f queries, %.0f failed, avg latency %.2f ms", q, failed, avgLatencyMs)
 	}
 }
 
@@ -91,4 +95,5 @@ type InsertedStats struct {
 type QueryStats struct {
 	Count           float64
 	TotalLatencySec float64
+	FailedCount     float64
 }

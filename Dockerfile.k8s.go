@@ -11,7 +11,7 @@ RUN go mod tidy && go mod download && go mod verify
 RUN CGO_ENABLED=0 go build -o loadrunner ./cmd/loadrunner
 
 FROM alpine:3.19
-RUN apk add --no-cache ca-certificates procps
+RUN apk add --no-cache ca-certificates procps bash
 WORKDIR /app
 COPY --from=builder /app/loadrunner .
 CMD ["sleep", "infinity"]

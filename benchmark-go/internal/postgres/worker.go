@@ -108,6 +108,7 @@ func (c *Context) RunQueryWorker(
 	queries *progress.QueryStats,
 	queriesPerRecord int,
 	queryDelaySec float64,
+	ignoreSelectErrors bool,
 ) {
 	for job := range queryQueue {
 		if job == nil {
@@ -124,10 +125,14 @@ func (c *Context) RunQueryWorker(
 			continue
 		}
 		t0 := time.Now()
+		var failed int
 		for i := 0; i < queriesPerRecord; i++ {
 			n, _ := QueryByPrimaryKey(context.Background(), conn, job.MRN)
 			if n != 1 {
-				log.Printf("Query by primary key returned %d rows for MEDICAL_RECORD_NUMBER=%s (expected 1)", n, job.MRN)
+				failed++
+				if !ignoreSelectErrors {
+					log.Printf("Query by primary key returned %d rows for MEDICAL_RECORD_NUMBER=%s (expected 1)", n, job.MRN)
+				}
 			}
 		}
 		latency := time.Since(t0).Seconds()
@@ -135,6 +140,7 @@ func (c *Context) RunQueryWorker(
 		queriesMu.Lock()
 		queries.Count += float64(queriesPerRecord)
 		queries.TotalLatencySec += latency
+		queries.FailedCount += float64(failed)
 		queriesMu.Unlock()
 	}
 }

@@ -77,7 +77,7 @@ def init_schema(client) -> None:
             SEX_AT_BIRTH Nullable(String),
             IS_PREGNANT Nullable(String)
         )
-        ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/01/hl7_messages_local', '{{replica}}', UPDATED_AT)
+        ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{{shard}}/hl7_messages_local', '{{replica}}', UPDATED_AT)
         ORDER BY MEDICAL_RECORD_NUMBER
         -- TTL UPDATED_AT + INTERVAL 1 DAY TO VOLUME 'azure'
         SETTINGS storage_policy = '{policy}'
@@ -115,7 +115,7 @@ def init_schema(client) -> None:
             SEX_AT_BIRTH Nullable(String),
             IS_PREGNANT Nullable(String)
         )
-        ENGINE = Distributed('{cluster}', '{DB_NAME}', hl7_messages_local, rand())
+        ENGINE = Distributed('{cluster}', '{DB_NAME}', hl7_messages_local, sipHash64(MEDICAL_RECORD_NUMBER))
     """)
     logger.info("Cluster tables hl7_messages created (ClickHouse)")
 
@@ -194,21 +194,22 @@ def insert_batch(client, rows: list[tuple[str, str, str]]) -> int:
     client.execute(
         f"INSERT INTO {DB_NAME}.hl7_messages ({cols}) VALUES",
         mapped,
-        # settings={
-        #     "insert_quorum": 2,
-        #     "insert_quorum_parallel": True,
-        #     "async_insert": 0,  # sync insert: wait for write to complete
-        # },
+        settings={
+            "insert_quorum": 2,  # 2 replicas per shard → quorum 2
+            "insert_quorum_parallel": 1,  # wait for quorum on each replica sequentially
+            "distributed_foreground_insert": 1,  # insert to distributed table in foreground
+            "async_insert": 0,  # sync insert: wait for write to complete
+        },
     )
     return len(rows)
 
 
 def query_by_primary_key(client, medical_record_number: str) -> list:
-    """Query hl7_messages by primary key MEDICAL_RECORD_NUMBER. Returns list of rows (0 or more)."""
+    """Query hl7_messages by primary key MEDICAL_RECORD_NUMBER. FINAL applies ReplacingMergeTree dedup (keeps row with latest UPDATED_AT)."""
     result = client.execute(
         f"SELECT * FROM {DB_NAME}.hl7_messages FINAL WHERE MEDICAL_RECORD_NUMBER = %(mrn)s",
         {"mrn": medical_record_number},
-        # settings={"select_sequential_consistency": 1},
+        settings={"select_sequential_consistency": 1, "prefer_localhost_replica": 0},
     )
     return list(result) if result else []
 
@@ -216,7 +217,8 @@ def query_by_primary_key(client, medical_record_number: str) -> list:
 def get_max_patient_counter(client) -> int:
     """Return the maximum patient ordinal in hl7_messages (from PATIENT_ID 'patient-NNNNNNNNNN'), or -1 if empty."""
     result = client.execute(
-        f"SELECT COALESCE(MAX(toInt64OrZero(substring(PATIENT_ID, 10))), -1) FROM {DB_NAME}.hl7_messages WHERE PATIENT_ID != ''"
+        f"SELECT COALESCE(MAX(toInt64OrZero(substring(PATIENT_ID, 10))), -1) FROM {DB_NAME}.hl7_messages WHERE PATIENT_ID != ''",
+        settings={"select_sequential_consistency": 1, "prefer_localhost_replica": 0},
     )
     if not result or result[0][0] is None:
         return -1

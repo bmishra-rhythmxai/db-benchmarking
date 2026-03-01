@@ -38,6 +38,7 @@ def _run_load_process(
     process_index: int,
     progress_queue: multiprocessing.Queue | None,
     start_barrier: multiprocessing.Barrier | None,
+    ignore_select_errors: bool = False,
 ) -> None:
     """Target for one child process: run_load with fixed total_records and patient_start. 1 producer per process."""
     records_this_process = total_records // processes + (1 if process_index < total_records % processes else 0)
@@ -60,6 +61,7 @@ def _run_load_process(
         progress_queue=progress_queue,
         process_index=process_index,
         start_barrier=start_barrier,
+        ignore_select_errors=ignore_select_errors,
     )
 
 
@@ -116,6 +118,11 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Fixed delay in milliseconds to wait before querying for each record (0 = no delay)",
+    )
+    p.add_argument(
+        "--ignore-select-errors",
+        action="store_true",
+        help="Do not log when primary-key query returns != 1 row (avoids console slowdown)",
     )
     args = p.parse_args()
 
@@ -185,6 +192,7 @@ def main() -> None:
                 i,
                 progress_queue,
                 start_barrier,
+                args.ignore_select_errors,
             ),
         )
         for i in range(args.processes)

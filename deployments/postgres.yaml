@@ -24,25 +24,42 @@ data:
   00-postgres-tuning.sh: |
     #!/bin/bash
     set -e
-    # echo "shared_buffers = 1GB" >> "$PGDATA/postgresql.conf"
-    # echo "wal_buffers = 128MB" >> "$PGDATA/postgresql.conf"
-    # echo "wal_compression = lz4" >> "$PGDATA/postgresql.conf"
-    # echo "effective_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
-    # echo "maintenance_io_concurrency = 64" >> "$PGDATA/postgresql.conf"
+    cat >> "$PGDATA/postgresql.conf" << 'EOF'
+    shared_buffers = 8GB
+    wal_buffers = 1GB
+    max_wal_size = 32GB
+    wal_writer_flush_after = 100MB
+    wal_compression = lz4
+    wal_keep_size = 64GB
+    checkpoint_timeout = 30min
+    io_workers = 32
+    autovacuum_max_workers = 4
+    effective_io_concurrency = 16
+    maintenance_io_concurrency = 32
+    max_parallel_maintenance_workers = 16
+    bgwriter_flush_after = 2MB
+    EOF
   00-replication-settings.sh: |
     #!/bin/bash
     set -e
-    echo "wal_level = replica" >> "$PGDATA/postgresql.conf"
-    echo "max_wal_senders = 4" >> "$PGDATA/postgresql.conf"
-    echo "listen_addresses = '*'" >> "$PGDATA/postgresql.conf"
+    cat >> "$PGDATA/postgresql.conf" << 'EOF'
+    wal_level = replica
+    max_wal_senders = 4
+    listen_addresses = '*'
+    # Synchronous replication: wait for at least one standby to confirm WAL flush before commit
+    # synchronous_commit = on
+    # synchronous_standby_names = 'ANY 1 (*)'
+    EOF
   01-setup-replication.sh: |
     #!/bin/bash
     set -e
     # Allow default user for normal connections and for replication (pg_basebackup)
-    echo "host all default 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
-    echo "host all default ::0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
-    echo "host replication default 0.0.0.0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
-    echo "host replication default ::0/0 scram-sha-256" >> "$PGDATA/pg_hba.conf"
+    cat >> "$PGDATA/pg_hba.conf" << 'EOF'
+    host all default 0.0.0.0/0 scram-sha-256
+    host all default ::0/0 scram-sha-256
+    host replication default 0.0.0.0/0 scram-sha-256
+    host replication default ::0/0 scram-sha-256
+    EOF
     psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "ALTER USER \"$POSTGRES_USER\" WITH REPLICATION;"
     psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT pg_reload_conf();"
     echo "Replication setup for default user OK"

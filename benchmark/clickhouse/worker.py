@@ -33,8 +33,9 @@ def _run_query_worker_clickhouse(
     queries_shared: list[float],
     queries_per_record: int,
     query_delay_sec: float = 0.0,
+    ignore_select_errors: bool = False,
 ) -> None:
-    """Query worker loop: get MRN from query_queue, run queries_per_record lookups, log if != 1 row. Stops on QUERY_SENTINEL."""
+    """Query worker loop: get MRN from query_queue, run queries_per_record lookups, log if != 1 row (unless ignored). Stops on QUERY_SENTINEL."""
     while True:
         item = query_queue.get()
         if item is QUERY_SENTINEL:
@@ -49,18 +50,22 @@ def _run_query_worker_clickhouse(
         conn = client_queue.get()
         try:
             total_latency_sec = 0.0
+            failed = 0
             for _ in range(queries_per_record):
                 t0 = time.perf_counter()
                 rows = backend.query_by_primary_key(conn, mrn)
                 total_latency_sec += time.perf_counter() - t0
                 if len(rows) != 1:
-                    logger.error(
-                        "Query by primary key returned %d rows for MEDICAL_RECORD_NUMBER=%s (expected 1)",
-                        len(rows), mrn,
-                    )
+                    failed += 1
+                    if not ignore_select_errors:
+                        logger.error(
+                            "Query by primary key returned %d rows for MEDICAL_RECORD_NUMBER=%s (expected 1)",
+                            len(rows), mrn,
+                        )
             with queries_lock:
                 queries_shared[0] += queries_per_record
                 queries_shared[1] += total_latency_sec
+                queries_shared[2] += failed
         finally:
             client_queue.put(conn)
         query_queue.task_done()
@@ -154,11 +159,12 @@ class ClickHouseWorker(BaseInsertWorker):
         queries_shared: list[float],
         queries_per_record: int,
         query_delay_sec: float = 0.0,
+        ignore_select_errors: bool = False,
     ):
         """Return a callable to run as query worker thread target (consumes query_queue, runs lookups)."""
         def run() -> None:
             _run_query_worker_clickhouse(
-                query_queue, self._resources.client_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec
+                query_queue, self._resources.client_queue, queries_lock, queries_shared, queries_per_record, query_delay_sec, ignore_select_errors
             )
         return run
 

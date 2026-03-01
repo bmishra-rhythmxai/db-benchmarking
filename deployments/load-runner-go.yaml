@@ -23,18 +23,18 @@ spec:
     spec:
       containers:
       - name: load-runner-go
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-go:v0.0.2
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-go:v0.0.15
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:
           requests:
             cpu: 10
-            memory: 10Gi
+            memory: 20Gi
           limits:
             cpu: 10
-            memory: 10Gi
+            memory: 20Gi
         env:
         - name: CLICKHOUSE_HOST
-          value: chi-clickhouse-dev-cluster-0-0
+          value: chi-clickhouse-dev-cluster-replica0
         - name: POSTGRES_HOST
           value: postgres

@@ -35,7 +35,7 @@ $1 ~ /^(sda|sdb)/ {
   printf "%-10s %-10f %-10f %-10f %-10f %-10f %-10f %-10f\n", $1, $2, $3, $6, $8, $9, $12, $23
 }'
 
-TAG=$(~/source/az-cli/.venv/bin/az acr repository show-tags --name devgwrxacr --repository bikash/postgres --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/postgres --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
 docker build -t devgwrxacr.azurecr.io/bikash/postgres:${TAG} -f Dockerfile.postgres .
 docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/postgres:.*|devgwrxacr.azurecr.io/bikash/postgres:${TAG}|" deployments/postgres.yaml
@@ -46,26 +46,29 @@ python main.py --database clickhouse --duration 21600 --batch-size 2 --batch-wai
 
 python main.py --database postgres   --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --process 4 --workers 5 --rows-per-second 200 --queries-per-record 2
 
+./loadrunner --database clickhouse --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
 ./loadrunner --database postgres   --duration 21600 --batch-size 2 --batch-wait-sec 1.0 --workers 20 --rows-per-second 200 --queries-per-record 2
+
 
 
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
-TAG=$(~/source/az-cli/.venv/bin/az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
 docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml
 k apply -f deployments/load-runner.yaml
 
-TAG=$(~/source/az-cli/.venv/bin/az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking-go --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking-go --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
 docker build -f Dockerfile.k8s.go -t devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking-go:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking-go:${TAG}|" deployments/load-runner-go.yaml
 k apply -f deployments/load-runner-go.yaml
 
+-- alter table hl7_messages_local drop partition all settings max_partition_size_to_drop = 0;
 -- drop table hl7_messages on cluster default sync
 -- drop table hl7_messages_local sync
--- select * from default.hl7_messages final where MEDICAL_RECORD_NUMBER = 'MRN-0000000599';
+-- select * from default.hl7_messages final where MEDICAL_RECORD_NUMBER = 'MRN-0000000000';
 -- select FHIR_ID from hl7_messages_local order by FHIR_ID
 -- select count(*) from hl7_messages
 -- select count(*) from hl7_messages_local
@@ -74,6 +77,10 @@ k apply -f deployments/load-runner-go.yaml
 -- select * from system.zookeeper where path = '/clickhouse/tables/01/hl7_messages_local/replicas'
 -- system drop replica 'chi-clickhouse-dev-cluster-0-0' from zkpath '/clickhouse/tables/01/hl7_messages_local'
 -- system drop replica 'chi-clickhouse-dev-cluster-0-1' from zkpath '/clickhouse/tables/01/hl7_messages_local'
+-- system drop replica 'chi-clickhouse-dev-cluster-1-0' from zkpath '/clickhouse/tables/01/hl7_messages_local'
+-- system drop replica 'chi-clickhouse-dev-cluster-1-1' from zkpath '/clickhouse/tables/01/hl7_messages_local'
+-- system drop replica 'chi-clickhouse-dev-cluster-2-0' from zkpath '/clickhouse/tables/01/hl7_messages_local'
+-- system drop replica 'chi-clickhouse-dev-cluster-2-1' from zkpath '/clickhouse/tables/01/hl7_messages_local'
 -- select * from system.replicas
 -- show tables
 -- show tables from system

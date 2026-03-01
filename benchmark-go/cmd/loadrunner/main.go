@@ -26,6 +26,7 @@ func main() {
 	producers := flag.Int("producers", 1, "Number of producer goroutines")
 	queriesPerRecord := flag.Int("queries-per-record", 10, "Primary-key queries per inserted record")
 	queryDelay := flag.Float64("query-delay", 0, "Fixed delay in ms before querying each record (0 = no delay)")
+	ignoreSelectErrors := flag.Bool("ignore-select-errors", false, "Do not log when primary-key query returns != 1 row (avoids console slowdown)")
 	flag.Parse()
 
 	if *database != "postgres" && *database != "clickhouse" {
@@ -62,6 +63,7 @@ func main() {
 		*queriesPerRecord,
 		queryDelaySec,
 		*producers,
+		*ignoreSelectErrors,
 		ctx,
 	)
 }

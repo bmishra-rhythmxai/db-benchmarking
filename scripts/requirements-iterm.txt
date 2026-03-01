@@ -1,0 +1,2 @@
+# For scripts/iterm_monitor_panes.py (iTerm2 Python API)
+iterm2

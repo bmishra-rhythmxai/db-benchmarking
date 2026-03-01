@@ -36,11 +36,11 @@ spec:
           image: clickhouse/clickhouse-keeper:26.1.3.52
           resources:
             requests:
-              memory: 1Gi
-              cpu: 500m
+              memory: 2Gi
+              cpu: 1
             limits:
-              memory: 1Gi
-              cpu: 500m
+              memory: 2Gi
+              cpu: 1
           volumeMounts:
           - mountPath: /var/lib/clickhouse-keeper
             name: keeper-data
@@ -53,7 +53,7 @@ spec:
         - ReadWriteOnce
         resources:
           requests:
-            storage: 20Gi
+            storage: 50Gi
         storageClassName: managed-csi
     - name: keeper-log
       spec:
@@ -61,7 +61,7 @@ spec:
         - ReadWriteOnce
         resources:
           requests:
-            storage: 20Gi
+            storage: 50Gi
         storageClassName: managed-csi
 ---
 apiVersion: clickhouse.altinity.com/v1
@@ -74,7 +74,7 @@ spec:
     clusters:
     - layout:
         replicasCount: 2
-        shardsCount: 1
+        shardsCount: 3
       name: dev-cluster
       secret:
         valueFrom:
@@ -129,6 +129,11 @@ spec:
     podTemplates:
     - name: ch-pod
       spec:
+        tolerations:
+        - key: workload
+          operator: Equal
+          value: ultra
+          effect: NoSchedule
         affinity:
           podAntiAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
@@ -147,10 +152,10 @@ spec:
           resources:
             limits:
               cpu: 8
-              memory: 16Gi
+              memory: 24Gi
             requests:
               cpu: 8
-              memory: 16Gi
+              memory: 24Gi
           volumeMounts:
           - mountPath: /var/lib/clickhouse
             name: ch-data
@@ -171,5 +176,4 @@ spec:
         - ReadWriteOnce
         resources:
           requests:
-            storage: 10Ti
-        storageClassName: managed-csi-premiumv2-10k-1200
+            storage: 10Gi
