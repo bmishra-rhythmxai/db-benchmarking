@@ -103,13 +103,6 @@ spec:
       labels:
         app: citus-coordinator
     spec:
-      tolerations:
-      - key: workload
-        operator: Equal
-        value: ultra
-        effect: NoSchedule
-      nodeSelector:
-        workload: ultra
       securityContext:
         runAsUser: 999
         fsGroup: 999
@@ -221,13 +214,6 @@ spec:
       labels:
         app: citus-worker
     spec:
-      tolerations:
-      - key: workload
-        operator: Equal
-        value: ultra
-        effect: NoSchedule
-      nodeSelector:
-        workload: ultra
       securityContext:
         runAsUser: 999
         fsGroup: 999

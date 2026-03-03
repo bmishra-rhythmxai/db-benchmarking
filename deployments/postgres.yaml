@@ -25,19 +25,21 @@ data:
     #!/bin/bash
     set -e
     cat >> "$PGDATA/postgresql.conf" << 'EOF'
+    synchronous_commit = off
     shared_buffers = 8GB
-    wal_buffers = 1GB
-    max_wal_size = 32GB
-    wal_writer_flush_after = 100MB
-    wal_compression = lz4
+    wal_buffers = 512MB
+    wal_writer_flush_after = 128
+    wal_compression = off
     wal_keep_size = 64GB
+    max_wal_size = 32GB
+    checkpoint_flush_after = 256
     checkpoint_timeout = 30min
     io_workers = 32
     autovacuum_max_workers = 4
-    effective_io_concurrency = 16
+    effective_io_concurrency = 64
     maintenance_io_concurrency = 32
     max_parallel_maintenance_workers = 16
-    bgwriter_flush_after = 2MB
+    bgwriter_flush_after = 0
     EOF
   00-replication-settings.sh: |
     #!/bin/bash
@@ -74,8 +76,8 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 20Ti
-  storageClassName: managed-csi-ultra-20k-3000
+      storage: 2Ti
+  storageClassName: managed-csi-premiumv2-10k-1200
 ---
 # Primary (writer): accepts writes and streams WAL to replicas
 apiVersion: apps/v1
@@ -95,13 +97,6 @@ spec:
       labels:
         app: postgres-primary
     spec:
-      tolerations:
-      - key: workload
-        operator: Equal
-        value: ultra
-        effect: NoSchedule
-      nodeSelector:
-        workload: ultra
       securityContext:
         runAsUser: 999
         fsGroup: 999
@@ -212,13 +207,6 @@ spec:
       labels:
         app: postgres-replica
     spec:
-      tolerations:
-      - key: workload
-        operator: Equal
-        value: ultra
-        effect: NoSchedule
-      nodeSelector:
-        workload: ultra
       securityContext:
         runAsUser: 999
         fsGroup: 999

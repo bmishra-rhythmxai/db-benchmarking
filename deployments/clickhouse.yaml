@@ -129,11 +129,6 @@ spec:
     podTemplates:
     - name: ch-pod
       spec:
-        tolerations:
-        - key: workload
-          operator: Equal
-          value: ultra
-          effect: NoSchedule
         affinity:
           podAntiAffinity:
             preferredDuringSchedulingIgnoredDuringExecution:
