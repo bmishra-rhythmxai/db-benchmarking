@@ -1,5 +1,6 @@
 # PostgreSQL 18 with sysstat for benchmarking.
 # Build and push to your registry, then set the image in deployments/postgres.yaml.
+# Build from repo root: docker build -f docker/Dockerfile.postgres -t postgres-perf:18 .
 FROM postgres:18.2-trixie
 
 USER root

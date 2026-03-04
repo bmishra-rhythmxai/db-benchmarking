@@ -1,5 +1,5 @@
 # Load-runner pod for running benchmarks against postgres/clickhouse in the benchmark namespace.
-# Build an image that includes the app: docker build -f Dockerfile.k8s -t load-runner:latest .
+# Build an image that includes the app: docker build -f docker/Dockerfile.k8s -t load-runner:latest .
 # Then run: kubectl apply -f deploy-load-runner.yaml
 # Exec in and run: python main.py --database postgres --duration 60
 # Or: python main.py --database clickhouse --duration 60

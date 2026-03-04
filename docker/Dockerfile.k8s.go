@@ -1,5 +1,5 @@
 # Dockerfile for Kubernetes load-runner (Go implementation; image includes app; no volume mount needed)
-# Build from repo root with benchmark-go as context: docker build -f Dockerfile.k8s.go -t load-runner-go:latest benchmark-go
+# Build from repo root: docker build -f docker/Dockerfile.k8s.go -t load-runner-go:latest .
 # Exec in and run: /app/loadrunner --database postgres --duration 60
 # Or: /app/loadrunner --database clickhouse --duration 60
 

@@ -1,0 +1,141 @@
+# 5 containers: postgres primary, postgres replica, clickhouse (2 replicas), load-runner-go.
+# Configurations aligned with deployments/postgres.yaml, deployments/clickhouse.yaml, deployments/load-runner-go.yaml.
+# Writer: postgres-primary (schema, inserts). Reader: postgres-replica (read-only). ClickHouse: single shard, 2 replicas.
+# Run from repo root: docker compose -f docker/docker-compose.yml up -d
+
+services:
+  postgres-primary:
+    image: postgres:18-alpine
+    container_name: benchmark-postgres-primary
+    environment:
+      POSTGRES_USER: default
+      POSTGRES_PASSWORD: strongpassword
+      POSTGRES_DB: default
+      REPLICATION_PASSWORD: strongpassword
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - ./scripts:/docker-entrypoint-initdb.d
+      - postgres-primary-data:/var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    cpus: "2"
+    mem_limit: 2g
+    mem_reservation: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U default -d default"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-replica:
+    image: postgres:18-alpine
+    container_name: benchmark-postgres-replica
+    user: "0"
+    entrypoint: []
+    command: ["/bin/sh", "/replica-init.sh"]
+    environment:
+      POSTGRES_USER: default
+      POSTGRES_PASSWORD: strongpassword
+      POSTGRES_DB: default
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - ./postgres-replica-init.sh:/replica-init.sh:ro
+      - postgres-replica-data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    cpus: "1.5"
+    mem_limit: 1536m
+    mem_reservation: 512m
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U default -d default"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # clickhouse-1:
+  #   image: clickhouse/clickhouse-server:24-alpine
+  #   container_name: benchmark-clickhouse-1
+  #   environment:
+  #     CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+  #     CLICKHOUSE_USER: default
+  #     CLICKHOUSE_PASSWORD: strongpassword
+  #   volumes:
+  #     - ../clickhouse-config.d:/etc/clickhouse-server/config.d
+  #   cap_add:
+  #     - SYS_NICE
+  #     - IPC_LOCK
+  #   ports:
+  #     - "8123:8123"
+  #   cpus: "2"
+  #   mem_limit: 4g
+  #   mem_reservation: 2g
+  #   ulimits:
+  #     nofile:
+  #       soft: 262144
+  #       hard: 262144
+  #   healthcheck:
+  #     test: ["CMD", "clickhouse-client", "--user", "default", "--password", "strongpassword", "--query", "SELECT 1"]
+  #     start_period: 15s
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+
+  # clickhouse-2:
+  #   image: clickhouse/clickhouse-server:24-alpine
+  #   container_name: benchmark-clickhouse-2
+  #   environment:
+  #     CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+  #     CLICKHOUSE_USER: default
+  #     CLICKHOUSE_PASSWORD: strongpassword
+  #   volumes:
+  #     - ../clickhouse-config.d:/etc/clickhouse-server/config.d
+  #   cap_add:
+  #     - SYS_NICE
+  #     - IPC_LOCK
+  #   ports:
+  #     - "8124:8123"
+  #   cpus: "2"
+  #   mem_limit: 4g
+  #   mem_reservation: 2g
+  #   ulimits:
+  #     nofile:
+  #       soft: 262144
+  #       hard: 262144
+  #   healthcheck:
+  #     test: ["CMD", "clickhouse-client", "--user", "default", "--password", "strongpassword", "--query", "SELECT 1"]
+  #     start_period: 15s
+  #     interval: 5s
+  #     timeout: 5s
+  #     retries: 10
+
+  load-runner-go:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.k8s.go
+    container_name: benchmark-load-runner-go
+    command: ["sleep", "infinity"]
+    environment:
+      POSTGRES_HOST: postgres-primary
+      CLICKHOUSE_HOST: clickhouse-1
+    cpus: "2"
+    mem_limit: 2g
+    mem_reservation: 512m
+    depends_on:
+      postgres-primary:
+        condition: service_healthy
+      postgres-replica:
+        condition: service_healthy
+      clickhouse-1:
+        condition: service_healthy
+      clickhouse-2:
+        condition: service_healthy
+    # Exec in and run: /app/loadrunner --database postgres --duration 60
+    # Or: /app/loadrunner --database clickhouse --duration 60
+
+volumes:
+  postgres-primary-data:
+  postgres-replica-data:

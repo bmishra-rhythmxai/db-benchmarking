@@ -52,13 +52,13 @@ python main.py --database postgres   --duration 21600 --batch-size 2 --batch-wai
 top -b -d 1 | grep "[c]lickhouse-keeper"
 
 TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
-docker build -f Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
+docker build -f docker/Dockerfile.k8s -t devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking:${TAG}|" deployments/load-runner.yaml
 k apply -f deployments/load-runner.yaml
 
 TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/db-benchmarking-go --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
-docker build -f Dockerfile.k8s.go -t devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG .
+docker build -f docker/Dockerfile.k8s.go -t devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG .
 docker push devgwrxacr.azurecr.io/bikash/db-benchmarking-go:$TAG
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/db-benchmarking-go:.*|devgwrxacr.azurecr.io/bikash/db-benchmarking-go:${TAG}|" deployments/load-runner-go.yaml
 k apply -f deployments/load-runner-go.yaml
