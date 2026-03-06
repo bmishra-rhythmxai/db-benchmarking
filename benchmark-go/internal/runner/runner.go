@@ -1,7 +1,6 @@
 package runner
 
 import (
-	"context"
 	"log"
 	"sync"
 	"time"
@@ -17,7 +16,7 @@ type WorkerCtx interface {
 	Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 	Teardown()
 	GetMaxPatientCounter() (int, error)
-	RunQueryWorker(queryQueue <-chan *model.QueryJob, queriesMu *sync.Mutex, queries *progress.QueryStats, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
+	RunQueryWorker(queryQueue <-chan *model.QueryJob, queryCh chan<- progress.QueryUpdate, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
 }
 
 // RunLoad runs the full load: producers, insert workers, query workers, progress logger.
@@ -39,11 +38,12 @@ func RunLoad(
 	queryQueueMax := max3(workers*4, batchSize*workers*4, targetRPS*4)
 	insertionQueue := make(chan *model.Record, insertionQueueMax)
 	queryQueue := make(chan *model.QueryJob, queryQueueMax)
-
-	var insertedMu sync.Mutex
-	inserted := &progress.InsertedStats{}
-	var queriesMu sync.Mutex
-	queries := &progress.QueryStats{}
+	insertStartedCh := make(chan struct{}, 256)
+	insertCh := make(chan progress.InsertUpdate, 256)
+	queryCh := make(chan progress.QueryUpdate, 256)
+	resultCh := make(chan progress.Snapshot, 1)
+	pendingCh := make(chan progress.PendingInfo, 1)
+	donePending := make(chan struct{})
 
 	runStart := time.Now()
 	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, batch_wait_sec=%.1f, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
@@ -60,12 +60,30 @@ func RunLoad(
 	patientStartStride := 10_000_000
 	log.Printf("Producers starting from patient counter %d (max in DB: %d)", patientStartBase, maxCounter)
 
-	progressCtx, stopProgress := context.WithCancel(context.Background())
-	go progress.Run(progressCtx, &insertedMu, inserted, &queriesMu, queries, 5*time.Second)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-donePending:
+				close(pendingCh)
+				return
+			case <-ticker.C:
+				select {
+				case pendingCh <- progress.PendingInfo{QueueLen: len(insertionQueue), BatchSize: batchSize}:
+				default:
+				}
+			}
+		}
+	}()
+
+	go progress.Run(insertCh, queryCh, resultCh, insertStartedCh, pendingCh, 5*time.Second)
 
 	var insertWg sync.WaitGroup
+	var insertExitWg sync.WaitGroup
+	insertExitWg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go worker.RunInsertWorker(backend, insertionQueue, queryQueue, &insertedMu, inserted, batchSize, batchWaitSec, queriesPerRecord, &insertWg)
+		go worker.RunInsertWorker(backend, insertionQueue, queryQueue, insertStartedCh, insertCh, batchSize, batchWaitSec, queriesPerRecord, &insertWg, &insertExitWg)
 	}
 
 	var queryWorkersWg sync.WaitGroup
@@ -75,7 +93,7 @@ func RunLoad(
 			queryWorkersWg.Add(1)
 			go func() {
 				defer queryWorkersWg.Done()
-				ctx.RunQueryWorker(queryQueue, &queriesMu, queries, queriesPerRecord, queryDelaySec, ignoreSelectErrors)
+				ctx.RunQueryWorker(queryQueue, queryCh, queriesPerRecord, queryDelaySec, ignoreSelectErrors)
 			}()
 		}
 	}
@@ -105,9 +123,10 @@ func RunLoad(
 		insertionQueue <- nil
 	}
 	insertWg.Wait()
-
-	stopProgress()
-	time.Sleep(100 * time.Millisecond)
+	insertExitWg.Wait() // wait for all workers to finish their final flush and return before closing channels
+	close(donePending)
+	close(insertStartedCh)
+	close(insertCh)
 
 	if runQueryWorkers {
 		for i := 0; i < workers; i++ {
@@ -115,20 +134,19 @@ func RunLoad(
 		}
 		queryWorkersWg.Wait()
 	}
+	close(queryCh)
 
+	snapshot := <-resultCh
 	runEnd := time.Now()
 	elapsed := runEnd.Sub(runStart).Seconds()
-	insertedMu.Lock()
-	totalInserted := int(inserted.Total)
-	originals := int(inserted.Originals)
-	duplicates := int(inserted.Duplicates)
-	totalInsertLatency := inserted.TotalInsertLatencySec
-	insertedMu.Unlock()
-	queriesMu.Lock()
-	queriesFinal := int(queries.Count)
-	totalQueryLatency := queries.TotalLatencySec
-	queriesFailed := int(queries.FailedCount)
-	queriesMu.Unlock()
+	totalInserted := int(snapshot.Inserted.Total)
+	originals := int(snapshot.Inserted.Originals)
+	duplicates := int(snapshot.Inserted.Duplicates)
+	totalInsertLatency := snapshot.Inserted.TotalInsertLatencySec
+	insertStatements := int(snapshot.Inserted.InsertStatements)
+	queriesFinal := int(snapshot.Queries.Count)
+	totalQueryLatency := snapshot.Queries.TotalLatencySec
+	queriesFailed := int(snapshot.Queries.FailedCount)
 
 	actualRPS := 0.0
 	if elapsed > 0 {
@@ -147,13 +165,18 @@ func RunLoad(
 		totalInserted, originals, duplicates, elapsed, actualRPS, targetRPS)
 
 	log.Printf("Database: %s", database)
-	log.Printf("Duration: %.2fs | Workers: %d | Rows inserted: %d (%d original, %d duplicate)", elapsed, workers, totalInserted, originals, duplicates)
-	log.Printf("Actual rate: %.1f rows/sec (target %d)", actualRPS, targetRPS)
+	log.Printf("Duration: %.2fs | Workers: %d | Rows inserted: %d (%d original, %d duplicate) | Insert statements: %d", elapsed, workers, totalInserted, originals, duplicates, insertStatements)
+	log.Printf("Actual insert rate: %.1f rows/sec (target %d)", actualRPS, targetRPS)
 	if totalInserted > 0 {
 		log.Printf("Insert latency: avg %.2f ms/row", avgInsertMs)
 	}
 	if queriesFinal > 0 {
-		log.Printf("Queries: %d executed, %d failed (avg latency %.2f ms)", queriesFinal, queriesFailed, avgQueryMs)
+		actualQueryRPS := 0.0
+		if elapsed > 0 {
+			actualQueryRPS = float64(queriesFinal) / elapsed
+		}
+		log.Printf("Actual query rate: %.1f queries/sec", actualQueryRPS)
+		log.Printf("Queries: %d executed, %d failed | Query latency: avg %.2f ms per SELECT", queriesFinal, queriesFailed, avgQueryMs)
 	}
 }
 

@@ -90,10 +90,13 @@ def _row_from_producer_tuple(t: tuple[str, str, str]) -> tuple:
     )
 
 
+HASH_PARTITION_MODULUS = 8
+
+
 def init_schema(conn) -> None:
+    """Create hl7_messages hash-partitioned table if not exists (modulus 8). On Citus coordinator, distribute by medical_record_number (auto-detected)."""
     with conn.cursor() as cur:
         cur.execute("""
-            -- DROP TABLE IF EXISTS hl7_messages;
             CREATE TABLE IF NOT EXISTS hl7_messages (
                 fhir_id TEXT,
                 rx_patient_id TEXT,
@@ -106,7 +109,7 @@ def init_schema(conn) -> None:
                 load_date TEXT,
                 checksum TEXT,
                 patient_id TEXT,
-                medical_record_number TEXT NOT NULL PRIMARY KEY,
+                medical_record_number TEXT NOT NULL,
                 name_prefix TEXT,
                 last_name TEXT,
                 first_name TEXT,
@@ -123,13 +126,18 @@ def init_schema(conn) -> None:
                 ethnicity_display TEXT,
                 fhir_ethnicity_display TEXT,
                 sex_at_birth TEXT,
-                is_pregnant TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_hl7_patient_id ON hl7_messages(patient_id);
-            -- Ensure source uses LZ4 compression (for existing tables)
-            ALTER TABLE hl7_messages ALTER COLUMN source SET COMPRESSION lz4;
+                is_pregnant TEXT,
+                PRIMARY KEY (medical_record_number)
+            ) PARTITION BY HASH (medical_record_number);
         """)
-        # Citus: distribute table by medical_record_number when running on coordinator
+        for i in range(HASH_PARTITION_MODULUS):
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS hl7_messages_{i} PARTITION OF hl7_messages "
+                f"FOR VALUES WITH (MODULUS {HASH_PARTITION_MODULUS}, REMAINDER {i})"
+            )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hl7_patient_id ON hl7_messages(patient_id);")
+        cur.execute("ALTER TABLE hl7_messages ALTER COLUMN source SET COMPRESSION lz4;")
+        # Citus: if extension is present, distribute by medical_record_number (auto-detected)
         cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'citus'")
         if cur.fetchone():
             cur.execute("SELECT 1 FROM citus_tables WHERE tablename = 'hl7_messages'")
@@ -141,7 +149,7 @@ def init_schema(conn) -> None:
                     "Citus: distributed hl7_messages by medical_record_number"
                 )
     conn.commit()
-    logger.info("Table hl7_messages created (PostgreSQL)")
+    logger.info("Table hl7_messages created with hash partitioning (modulus %d)", HASH_PARTITION_MODULUS)
 
 
 def init_schema_standalone(host: str, port: int) -> None:

@@ -15,6 +15,8 @@ import (
 )
 
 const (
+	hashPartitionModulus = 8
+
 	createTableSQL = `
 CREATE TABLE IF NOT EXISTS hl7_messages (
     fhir_id TEXT,
@@ -28,7 +30,7 @@ CREATE TABLE IF NOT EXISTS hl7_messages (
     load_date TEXT,
     checksum TEXT,
     patient_id TEXT,
-    medical_record_number TEXT NOT NULL PRIMARY KEY,
+    medical_record_number TEXT NOT NULL,
     name_prefix TEXT,
     last_name TEXT,
     first_name TEXT,
@@ -45,9 +47,9 @@ CREATE TABLE IF NOT EXISTS hl7_messages (
     ethnicity_display TEXT,
     fhir_ethnicity_display TEXT,
     sex_at_birth TEXT,
-    is_pregnant TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_hl7_patient_id ON hl7_messages(patient_id);
+    is_pregnant TEXT,
+    PRIMARY KEY (medical_record_number)
+) PARTITION BY HASH (medical_record_number);
 `
 )
 
@@ -103,25 +105,42 @@ func PrewarmPool(ctx context.Context, pool *pgxpool.Pool, size int) error {
 	return nil
 }
 
-// InitSchema creates hl7_messages table if not exists.
-// When running on a Citus coordinator, distributes the table by medical_record_number.
+// InitSchema creates hl7_messages hash-partitioned table if not exists (modulus 8).
+// When running on a Citus coordinator, distributes the table by medical_record_number (auto-detected).
 func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, createTableSQL)
-	if err != nil {
+	if _, err := pool.Exec(ctx, createTableSQL); err != nil {
 		return err
 	}
-	log.Println("Table hl7_messages created (PostgreSQL)")
-	// Citus: distribute by medical_record_number when extension is present
-	_, errDist := pool.Exec(ctx, "SELECT create_distributed_table('hl7_messages', 'medical_record_number')")
-	if errDist != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(errDist, &pgErr) && pgErr.Code == "42883" {
-			// undefined_function — Citus not installed, skip
-		} else {
-			log.Printf("Citus create_distributed_table: %v", errDist)
+	for i := 0; i < hashPartitionModulus; i++ {
+		partSQL := "CREATE TABLE IF NOT EXISTS hl7_messages_" + strconv.Itoa(i) +
+			" PARTITION OF hl7_messages FOR VALUES WITH (MODULUS " + strconv.Itoa(hashPartitionModulus) + ", REMAINDER " + strconv.Itoa(i) + ")"
+		if _, err := pool.Exec(ctx, partSQL); err != nil {
+			return err
 		}
-	} else {
-		log.Println("Citus: distributed hl7_messages by medical_record_number")
+	}
+	if _, err := pool.Exec(ctx, "CREATE INDEX IF NOT EXISTS idx_hl7_patient_id ON hl7_messages(patient_id)"); err != nil {
+		return err
+	}
+	log.Printf("Table hl7_messages created with hash partitioning (modulus %d)", hashPartitionModulus)
+	// Citus: if extension is present, distribute by medical_record_number
+	var hasCitus int
+	errExt := pool.QueryRow(ctx, "SELECT 1 FROM pg_extension WHERE extname = 'citus'").Scan(&hasCitus)
+	if errExt == nil && hasCitus == 1 {
+		var alreadyDist int
+		errDist := pool.QueryRow(ctx, "SELECT 1 FROM citus_tables WHERE tablename = 'hl7_messages'").Scan(&alreadyDist)
+		if errDist != nil {
+			_, errDist = pool.Exec(ctx, "SELECT create_distributed_table('hl7_messages', 'medical_record_number')")
+			if errDist != nil {
+				var pgErr *pgconn.PgError
+				if errors.As(errDist, &pgErr) && pgErr.Code == "42883" {
+					// undefined_function — shouldn't happen if extension exists
+				} else {
+					log.Printf("Citus create_distributed_table: %v", errDist)
+				}
+			} else {
+				log.Println("Citus: distributed hl7_messages by medical_record_number")
+			}
+		}
 	}
 	return nil
 }

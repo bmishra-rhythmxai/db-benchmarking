@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -99,11 +98,10 @@ func (c *Context) GetMaxPatientCounter() (int, error) {
 	return GetMaxPatientCounter(context.Background(), conn)
 }
 
-// RunQueryWorker consumes from queryQueue and runs queries.
+// RunQueryWorker consumes from queryQueue and runs queries, sends deltas to queryCh.
 func (c *Context) RunQueryWorker(
 	queryQueue <-chan *model.QueryJob,
-	queriesMu *sync.Mutex,
-	queries *progress.QueryStats,
+	queryCh chan<- progress.QueryUpdate,
 	queriesPerRecord int,
 	queryDelaySec float64,
 	ignoreSelectErrors bool,
@@ -132,10 +130,10 @@ func (c *Context) RunQueryWorker(
 		}
 		latency := time.Since(t0).Seconds()
 		c.ch <- conn
-		queriesMu.Lock()
-		queries.Count += float64(queriesPerRecord)
-		queries.TotalLatencySec += latency
-		queries.FailedCount += float64(failed)
-		queriesMu.Unlock()
+		queryCh <- progress.QueryUpdate{
+			Count:           float64(queriesPerRecord),
+			TotalLatencySec: latency,
+			FailedCount:     float64(failed),
+		}
 	}
 }

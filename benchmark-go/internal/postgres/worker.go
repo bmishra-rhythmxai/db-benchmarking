@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/db-benchmarking/internal/model"
@@ -49,12 +48,13 @@ func (b *Backend) InsertBatch(conn interface{}, rows []worker.RowForDB) (int, er
 
 // Context handles setup/teardown and query workers for PostgreSQL.
 type Context struct {
-	pool *pgxpool.Pool
+	insertPool *pgxpool.Pool
+	selectPool *pgxpool.Pool
 }
 
-// Setup creates pool, prewarms, and inits schema.
+// Setup creates separate insert and select pools, prewarms, and inits schema.
 func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error) {
-	if c.pool != nil {
+	if c.insertPool != nil {
 		log.Fatal("postgres Setup already called")
 	}
 	host := os.Getenv("POSTGRES_HOST")
@@ -62,38 +62,53 @@ func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 		host = defaultHost
 	}
 	port := defaultPort
-	poolSize := numWorkers * 2
 	ctx := context.Background()
-	log.Printf("Creating PostgreSQL connection pool at %s:%d (%d connections for %d insert + %d query workers) ...",
-		host, port, poolSize, numWorkers, numWorkers)
-	pool, err := CreatePool(ctx, host, port, poolSize)
+	log.Printf("Creating PostgreSQL connection pools at %s:%d (%d insert + %d select connections) ...",
+		host, port, numWorkers, numWorkers)
+	insertPool, err := CreatePool(ctx, host, port, numWorkers)
 	if err != nil {
 		return nil, err
 	}
-	c.pool = pool
-	if err := PrewarmPool(ctx, pool, poolSize); err != nil {
-		pool.Close()
+	c.insertPool = insertPool
+	if err := PrewarmPool(ctx, insertPool, numWorkers); err != nil {
+		insertPool.Close()
 		return nil, err
 	}
-	if err := InitSchema(ctx, pool); err != nil {
-		pool.Close()
+	selectPool, err := CreatePool(ctx, host, port, numWorkers)
+	if err != nil {
+		insertPool.Close()
+		return nil, err
+	}
+	c.selectPool = selectPool
+	if err := PrewarmPool(ctx, selectPool, numWorkers); err != nil {
+		insertPool.Close()
+		selectPool.Close()
+		return nil, err
+	}
+	if err := InitSchema(ctx, insertPool); err != nil {
+		insertPool.Close()
+		selectPool.Close()
 		return nil, err
 	}
 	log.Printf("Starting insertions (target %d rows/sec) ...", targetRPS)
-	return &Backend{pool: pool}, nil
+	return &Backend{pool: insertPool}, nil
 }
 
-// Teardown closes the pool.
+// Teardown closes both pools.
 func (c *Context) Teardown() {
-	if c.pool != nil {
-		c.pool.Close()
-		c.pool = nil
+	if c.selectPool != nil {
+		c.selectPool.Close()
+		c.selectPool = nil
+	}
+	if c.insertPool != nil {
+		c.insertPool.Close()
+		c.insertPool = nil
 	}
 }
 
 // GetMaxPatientCounter returns the max patient ordinal in the DB.
 func (c *Context) GetMaxPatientCounter() (int, error) {
-	conn, err := c.pool.Acquire(context.Background())
+	conn, err := c.selectPool.Acquire(context.Background())
 	if err != nil {
 		return -1, err
 	}
@@ -101,11 +116,10 @@ func (c *Context) GetMaxPatientCounter() (int, error) {
 	return GetMaxPatientCounter(context.Background(), conn)
 }
 
-// RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, updates queries stats.
+// RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, sends query deltas to queryCh.
 func (c *Context) RunQueryWorker(
 	queryQueue <-chan *model.QueryJob,
-	queriesMu *sync.Mutex,
-	queries *progress.QueryStats,
+	queryCh chan<- progress.QueryUpdate,
 	queriesPerRecord int,
 	queryDelaySec float64,
 	ignoreSelectErrors bool,
@@ -120,7 +134,7 @@ func (c *Context) RunQueryWorker(
 				time.Sleep(time.Until(deadline))
 			}
 		}
-		conn, err := c.pool.Acquire(context.Background())
+		conn, err := c.selectPool.Acquire(context.Background())
 		if err != nil {
 			continue
 		}
@@ -137,10 +151,10 @@ func (c *Context) RunQueryWorker(
 		}
 		latency := time.Since(t0).Seconds()
 		conn.Release()
-		queriesMu.Lock()
-		queries.Count += float64(queriesPerRecord)
-		queries.TotalLatencySec += latency
-		queries.FailedCount += float64(failed)
-		queriesMu.Unlock()
+		queryCh <- progress.QueryUpdate{
+			Count:           float64(queriesPerRecord),
+			TotalLatencySec: latency,
+			FailedCount:     float64(failed),
+		}
 	}
 }

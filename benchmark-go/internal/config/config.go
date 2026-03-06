@@ -3,7 +3,7 @@ package config
 import "os"
 
 const (
-	DBName   = "default"
+	DBName   = "postgres"
 	User     = "default"
 	Password = "strongpassword"
 )

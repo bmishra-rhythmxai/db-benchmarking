@@ -72,9 +72,11 @@ class BaseInsertWorker(ABC):
         ...
 
     def _flush(self, batch: Batch) -> None:
-        """Insert batch, update inserted count (total, originals, duplicates), insert latency, push MRNs to query_queue."""
+        """Insert batch, update inserted count (total, originals, duplicates), insert latency, in_process, push MRNs to query_queue."""
         if not batch:
             return
+        with self.inserted_lock:
+            self.inserted_shared[5] += 1  # in process
         conn = self.get_connection()
         try:
             batch_for_db: list[tuple[str, str, str]] = [(r[0], r[1], r[2]) for r in batch]
@@ -88,11 +90,16 @@ class BaseInsertWorker(ABC):
                 self.inserted_shared[1] += n_originals
                 self.inserted_shared[2] += n_duplicates
                 self.inserted_shared[3] += insert_latency_sec
+                self.inserted_shared[4] += 1  # insert statements (batches)
             if self.queries_per_record > 0:
                 insert_time = time.time()
                 for mrn in _mrns_from_batch(batch):
                     self.query_queue.put((mrn, insert_time))
         finally:
+            with self.inserted_lock:
+                self.inserted_shared[5] -= 1
+                if self.inserted_shared[5] < 0:
+                    self.inserted_shared[5] = 0
             self.release_connection(conn)
 
     # Short poll interval so we don't block for batch_wait_sec when queue is empty (which would

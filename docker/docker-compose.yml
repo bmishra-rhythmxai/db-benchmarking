@@ -129,10 +129,10 @@ services:
         condition: service_healthy
       postgres-replica:
         condition: service_healthy
-      clickhouse-1:
-        condition: service_healthy
-      clickhouse-2:
-        condition: service_healthy
+      # clickhouse-1:
+      #   condition: service_healthy
+      # clickhouse-2:
+      #   condition: service_healthy
     # Exec in and run: /app/loadrunner --database postgres --duration 60
     # Or: /app/loadrunner --database clickhouse --duration 60
 

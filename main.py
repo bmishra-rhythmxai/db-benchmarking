@@ -169,7 +169,7 @@ def main() -> None:
         progress_thread = threading.Thread(
             target=run_aggregated_progress_logger,
             args=(progress_queue, args.processes, progress_stop),
-            kwargs={"interval_sec": 5.0},
+            kwargs={"interval_sec": 5.0, "batch_size": args.batch_size},
             daemon=True,
         )
 

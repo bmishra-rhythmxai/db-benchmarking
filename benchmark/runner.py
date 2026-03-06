@@ -83,7 +83,7 @@ def run_load(
     query_queue: queue.Queue = queue.Queue(maxsize=query_queue_max)
 
     inserted_lock = threading.Lock()
-    inserted_shared: list[float] = [0, 0, 0, 0.0]  # [total, originals, duplicates, total_insert_latency_sec]
+    inserted_shared: list[float] = [0, 0, 0, 0.0, 0, 0]  # [total, originals, duplicates, total_insert_latency_sec, insert_statements, in_process]
     queries_lock = threading.Lock()
     queries_shared: list[float] = [0, 0.0, 0.0]  # [count, total_latency_sec, failed_count]
     progress_stop = threading.Event()
@@ -125,16 +125,23 @@ def run_load(
         start_barrier.wait()
 
     use_aggregated_progress = progress_queue is not None and process_index is not None
+    def get_pending() -> int:
+        try:
+            return insertion_queue.qsize() // batch_size if batch_size > 0 else 0
+        except (NotImplementedError, AttributeError):
+            return 0
+
     if use_aggregated_progress:
         progress_thread = threading.Thread(
             target=run_progress_reporter,
-            args=(process_index, progress_queue, inserted_lock, inserted_shared, queries_lock, queries_shared, progress_stop),
+            args=(process_index, progress_queue, inserted_lock, inserted_shared, queries_lock, queries_shared, insertion_queue, progress_stop),
             daemon=True,
         )
     else:
         progress_thread = threading.Thread(
             target=run_progress_logger,
             args=(inserted_lock, inserted_shared, progress_stop, queries_lock, queries_shared),
+            kwargs={"interval_sec": 5.0, "get_pending": get_pending},
             daemon=True,
         )
 
@@ -206,10 +213,14 @@ def run_load(
     if use_aggregated_progress:
         # Send final stats so parent has latest combined totals
         with inserted_lock:
-            ins = (inserted_shared[0], inserted_shared[1], inserted_shared[2], inserted_shared[3])
+            ins = (inserted_shared[0], inserted_shared[1], inserted_shared[2], inserted_shared[3], inserted_shared[4], inserted_shared[5])
+        try:
+            queue_len = insertion_queue.qsize()
+        except (NotImplementedError, AttributeError):
+            queue_len = 0
         with queries_lock:
             q = (queries_shared[0], queries_shared[1], queries_shared[2])
-        progress_queue.put((process_index, (*ins, q[0], q[1], q[2])))
+        progress_queue.put((process_index, (*ins, queue_len, q[0], q[1], q[2])))
     progress_thread.join(timeout=1.0)
 
     for w in insert_worker_threads:
@@ -228,6 +239,7 @@ def run_load(
     originals_final = int(inserted_shared[1])
     duplicates_final = int(inserted_shared[2])
     total_insert_latency_sec = inserted_shared[3]
+    insert_statements_final = int(inserted_shared[4])
     queries_final = int(queries_shared[0])
     total_query_latency_sec = queries_shared[1]
     queries_failed_final = int(queries_shared[2])
@@ -242,9 +254,11 @@ def run_load(
     )
 
     print(f"Database: {database}")
-    print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final} ({originals_final} original, {duplicates_final} duplicate)")
-    print(f"Actual rate: {actual_rps:.1f} rows/sec (target {target_rps})")
+    print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final} ({originals_final} original, {duplicates_final} duplicate) | Insert statements: {insert_statements_final}")
+    print(f"Actual insert rate: {actual_rps:.1f} rows/sec (target {target_rps})")
     if total_inserted_final > 0:
         print(f"Insert latency: avg {avg_insert_latency_ms:.2f} ms/row")
     if queries_final > 0:
-        print(f"Queries: {queries_final} executed, {queries_failed_final} failed (avg latency {avg_query_latency_ms:.2f} ms)")
+        actual_query_rps = queries_final / elapsed if elapsed > 0 else 0
+        print(f"Actual query rate: {actual_query_rps:.1f} queries/sec")
+        print(f"Queries: {queries_final} executed, {queries_failed_final} failed | Query latency: avg {avg_query_latency_ms:.2f} ms per SELECT")

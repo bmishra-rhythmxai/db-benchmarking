@@ -49,18 +49,22 @@ func mrnsFromBatch(batch []*model.Record) []string {
 }
 
 // RunInsertWorker consumes from insertionQueue, batches by batchSize or batchWaitSec, inserts via backend, pushes MRNs to queryQueue.
-// Stops when it receives nil (*Record). If wg is non-nil, Done() is called after processing each item (queue drain).
+// Sends insert-started on insertStartedCh at flush start and insert deltas to insertCh on completion. Stops when it receives nil (*Record). If wg is non-nil, Done() is called after processing each item (queue drain). If exitWg is non-nil, Done() is called when the worker is about to return (after any final flush).
 func RunInsertWorker(
 	backend InsertBackend,
 	insertionQueue <-chan *model.Record,
 	queryQueue chan *model.QueryJob,
-	insertedMu *sync.Mutex,
-	inserted *progress.InsertedStats,
+	insertStartedCh chan<- struct{},
+	insertCh chan<- progress.InsertUpdate,
 	batchSize int,
 	batchWaitSec float64,
 	queriesPerRecord int,
 	wg *sync.WaitGroup,
+	exitWg *sync.WaitGroup,
 ) {
+	if exitWg != nil {
+		defer exitWg.Done()
+	}
 	var batch []*model.Record
 	batchStart := time.Now()
 	for {
@@ -83,19 +87,19 @@ func RunInsertWorker(
 			}
 			if rec == nil {
 				if len(batch) > 0 {
-					flush(backend, batch, queryQueue, insertedMu, inserted, queriesPerRecord)
+					flush(backend, batch, queryQueue, insertStartedCh, insertCh, queriesPerRecord)
 				}
 				return
 			}
 			batch = append(batch, rec)
 			if len(batch) >= batchSize {
-				flush(backend, batch, queryQueue, insertedMu, inserted, queriesPerRecord)
+				flush(backend, batch, queryQueue, insertStartedCh, insertCh, queriesPerRecord)
 				batch = nil
 				batchStart = time.Now()
 			}
 		case <-time.After(timeout):
 			if len(batch) > 0 && time.Since(batchStart).Seconds() >= batchWaitSec {
-				flush(backend, batch, queryQueue, insertedMu, inserted, queriesPerRecord)
+				flush(backend, batch, queryQueue, insertStartedCh, insertCh, queriesPerRecord)
 				batch = nil
 				batchStart = time.Now()
 			}
@@ -107,13 +111,14 @@ func flush(
 	backend InsertBackend,
 	batch []*model.Record,
 	queryQueue chan *model.QueryJob,
-	insertedMu *sync.Mutex,
-	inserted *progress.InsertedStats,
+	insertStartedCh chan<- struct{},
+	insertCh chan<- progress.InsertUpdate,
 	queriesPerRecord int,
 ) {
 	if len(batch) == 0 {
 		return
 	}
+	insertStartedCh <- struct{}{}
 	conn := backend.GetConn()
 	defer backend.ReleaseConn(conn)
 	rows := make([]RowForDB, len(batch))
@@ -125,6 +130,7 @@ func flush(
 	latency := time.Since(t0).Seconds()
 	if err != nil {
 		log.Printf("InsertBatch error: %v", err)
+		insertCh <- progress.InsertUpdate{} // decrement inProcess in progress goroutine
 		return
 	}
 	nOriginals := 0
@@ -134,12 +140,13 @@ func flush(
 		}
 	}
 	nDuplicates := len(batch) - nOriginals
-	insertedMu.Lock()
-	inserted.Total += float64(n)
-	inserted.Originals += float64(nOriginals)
-	inserted.Duplicates += float64(nDuplicates)
-	inserted.TotalInsertLatencySec += latency
-	insertedMu.Unlock()
+	insertCh <- progress.InsertUpdate{
+		Total:                 float64(n),
+		Originals:             float64(nOriginals),
+		Duplicates:            float64(nDuplicates),
+		TotalInsertLatencySec: latency,
+		InsertStatements:      1,
+	}
 	if queriesPerRecord > 0 {
 		insertTime := time.Now()
 		for _, mrn := range mrnsFromBatch(batch) {
