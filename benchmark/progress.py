@@ -8,9 +8,90 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-WHITE = "\033[37m"
-YELLOW = "\033[33m"
 RESET = "\033[0m"
+DIM = "\033[2m"
+CYAN = "\033[36m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+WHITE = "\033[37m"
+
+COL_W = 12
+PREFIX = "           "  # 11 chars to align with "  Insert   " / "  Query    "
+
+
+def _pad_left(s: str, w: int) -> str:
+    """Right-align s in column of width w (pad with spaces on the left)."""
+    if len(s) >= w:
+        return s
+    return s.rjust(w)
+
+
+def _fmt_insert_header() -> str:
+    """Insert row: status (incoming first) | interval (int_) | cumulative (cum_)."""
+    return (
+        f"{YELLOW}  Insert   "
+        f"{_pad_left('incoming', COL_W)}{_pad_left('pending', COL_W)}"
+        f"{_pad_left('in_proc', COL_W)}{_pad_left('completed', COL_W)} "
+        f"{_pad_left('int_tot', COL_W)}{_pad_left('int_orig', COL_W)}"
+        f"{_pad_left('int_dup', COL_W)}{_pad_left('int_avg_ms', COL_W)} "
+        f"{_pad_left('cum_tot', COL_W)}{_pad_left('cum_orig', COL_W)}"
+        f"{_pad_left('cum_dup', COL_W)}{_pad_left('cum_avg_ms', COL_W)}"
+        f"{RESET}"
+    )
+
+
+def _fmt_insert_data(
+    incoming: int,
+    pending: int,
+    in_process: int,
+    interval_statements: int,
+    interval_total: int,
+    interval_originals: int,
+    interval_duplicates: int,
+    interval_avg_insert_ms: float,
+    total: int,
+    originals: int,
+    duplicates: int,
+    cumulative_avg_insert_ms: float,
+) -> str:
+    """One data row for Insert: 12 right-aligned values (incoming first), cyan."""
+    return (
+        f"{PREFIX}"
+        f"{CYAN}{incoming:>{COL_W}d}{RESET}{CYAN}{pending:>{COL_W}d}{RESET}"
+        f"{CYAN}{in_process:>{COL_W}d}{RESET}{CYAN}{interval_statements:>{COL_W}d}{RESET} "
+        f"{CYAN}{interval_total:>{COL_W}d}{RESET}{CYAN}{interval_originals:>{COL_W}d}{RESET}"
+        f"{CYAN}{interval_duplicates:>{COL_W}d}{RESET}{CYAN}{interval_avg_insert_ms:>{COL_W}.2f}{RESET} "
+        f"{CYAN}{total:>{COL_W}d}{RESET}{CYAN}{originals:>{COL_W}d}{RESET}"
+        f"{CYAN}{duplicates:>{COL_W}d}{RESET}{CYAN}{cumulative_avg_insert_ms:>{COL_W}.2f}{RESET}"
+    )
+
+
+def _fmt_query_header() -> str:
+    """Query row: interval (int_) | cumulative (cum_)."""
+    return (
+        f"{YELLOW}  Query    "
+        f"{_pad_left('int_queries', COL_W)}{_pad_left('int_failed', COL_W)}{_pad_left('int_avg_ms', COL_W)} "
+        f"{_pad_left('cum_queries', COL_W)}{_pad_left('cum_failed', COL_W)}{_pad_left('cum_avg_ms', COL_W)}"
+        f"{RESET}"
+    )
+
+
+def _fmt_query_data(
+    interval_q: int,
+    interval_failed: int,
+    interval_avg_ms: float,
+    q: int,
+    failed: int,
+    avg_latency_ms: float,
+) -> str:
+    """One data row for Query: 6 right-aligned values, cyan."""
+    return (
+        f"{PREFIX}"
+        f"{CYAN}{interval_q:>{COL_W}d}{RESET}{CYAN}{interval_failed:>{COL_W}d}{RESET}"
+        f"{CYAN}{interval_avg_ms:>{COL_W}.2f}{RESET} "
+        f"{CYAN}{q:>{COL_W}.0f}{RESET}{CYAN}{failed:>{COL_W}.0f}{RESET}"
+        f"{CYAN}{avg_latency_ms:>{COL_W}.2f}{RESET}"
+    )
 
 # Tuple: (total, originals, duplicates, total_insert_latency_sec, insert_statements, in_process, queue_len, query_count, query_latency_sec, query_failed_count)
 ProgressStats = tuple[float, float, float, float, float, float, int, float, float, float]
@@ -30,6 +111,8 @@ def run_progress_logger(
     prev_queries = 0.0
     prev_query_latency_sec = 0.0
     prev_failed = 0.0
+    prev_pending = 0
+    prev_in_process = 0
     while not stop_event.is_set():
         stop_event.wait(interval_sec)
         if stop_event.is_set():
@@ -62,30 +145,42 @@ def run_progress_logger(
         prev_failed = failed
         avg_latency_ms = (total_latency_sec / q * 1000.0) if q > 0 else 0.0
         interval_avg_ms = (interval_query_latency_sec / interval_q * 1000.0) if interval_q > 0 else 0.0
-        # This interval first
-        logger.info("---")
-        logger.info(
-            "%sInsert progress (this interval): %d total, %d original, %d duplicate, %d insert statements, avg latency %.2f ms%s",
-            WHITE, interval_total, interval_originals, interval_duplicates, interval_statements, interval_avg_insert_ms, RESET,
-        )
-        logger.info(
-            "%sQuery progress (this interval): %d queries, %d failed, avg latency %.2f ms%s",
-            WHITE, interval_q, interval_failed, interval_avg_ms, RESET,
-        )
         pending = get_pending() if get_pending else 0
-        logger.info("---")
-        # Then cumulative
+        # Incoming = batches queued this interval ≈ completed + change in pending + change in in_process
+        incoming = interval_statements + (pending - prev_pending) + (in_process - prev_in_process)
+        prev_pending = pending
+        prev_in_process = in_process
+        # Table format: Insert (header + data row), Query (header + data row). Same as Go.
+        logger.info("%s---%s", DIM, RESET)
+        logger.info("%s", _fmt_insert_header())
         logger.info(
-            "%sInsert progress (cumulative): %d total, %d original, %d duplicate, %d insert statements, avg latency %.2f ms%s",
-            YELLOW, int(total), int(originals), int(duplicates), int(insert_statements), cumulative_avg_insert_ms, RESET,
+            "%s",
+            _fmt_insert_data(
+                incoming,
+                pending,
+                in_process,
+                interval_statements,
+                interval_total,
+                interval_originals,
+                interval_duplicates,
+                interval_avg_insert_ms,
+                int(total),
+                int(originals),
+                int(duplicates),
+                cumulative_avg_insert_ms,
+            ),
         )
+        logger.info("%s", _fmt_query_header())
         logger.info(
-            "%sInsert status (pending = %d, in process = %d)%s",
-            YELLOW, pending, in_process, RESET,
-        )
-        logger.info(
-            "%sQuery progress (cumulative): %d queries, %d failed, avg latency %.2f ms%s",
-            YELLOW, q, int(failed), avg_latency_ms, RESET,
+            "%s",
+            _fmt_query_data(
+                interval_q,
+                interval_failed,
+                interval_avg_ms,
+                q,
+                int(failed),
+                avg_latency_ms,
+            ),
         )
 
 
@@ -105,32 +200,42 @@ def _log_aggregated(
     cumulative_avg_insert_ms: float,
     pending: int,
     in_process: int,
+    incoming: int,
     q: float,
     failed: float,
     avg_query_latency_ms: float,
 ) -> None:
-    """Print one aggregated progress block (interval + cumulative)."""
-    logger.info("---")
+    """Print one aggregated progress block (table format, same as Go)."""
+    logger.info("%s---%s", DIM, RESET)
+    logger.info("%s", _fmt_insert_header())
     logger.info(
-        "%sInsert progress (this interval): %d total, %d original, %d duplicate, %d insert statements, avg latency %.2f ms%s",
-        WHITE, interval_total, interval_originals, interval_duplicates, interval_statements, interval_avg_insert_ms, RESET,
+        "%s",
+        _fmt_insert_data(
+            incoming,
+            pending,
+            in_process,
+            interval_statements,
+            interval_total,
+            interval_originals,
+            interval_duplicates,
+            interval_avg_insert_ms,
+            int(total),
+            int(originals),
+            int(duplicates),
+            cumulative_avg_insert_ms,
+        ),
     )
+    logger.info("%s", _fmt_query_header())
     logger.info(
-        "%sQuery progress (this interval): %d queries, %d failed, avg latency %.2f ms%s",
-        WHITE, interval_q, interval_failed, interval_avg_query_ms, RESET,
-    )
-    logger.info("---")
-    logger.info(
-        "%sInsert progress (cumulative): %d total, %d original, %d duplicate, %d insert statements, avg latency %.2f ms%s",
-        YELLOW, int(total), int(originals), int(duplicates), int(insert_statements), cumulative_avg_insert_ms, RESET,
-    )
-    logger.info(
-        "%sInsert status (pending = %d, in process = %d)%s",
-        YELLOW, pending, in_process, RESET,
-    )
-    logger.info(
-        "%sQuery progress (cumulative): %d queries, %d failed, avg latency %.2f ms%s",
-        YELLOW, int(q), int(failed), avg_query_latency_ms, RESET,
+        "%s",
+        _fmt_query_data(
+            interval_q,
+            interval_failed,
+            interval_avg_query_ms,
+            int(q),
+            int(failed),
+            avg_query_latency_ms,
+        ),
     )
 
 
@@ -153,6 +258,8 @@ def run_aggregated_progress_logger(
     prev_queries = 0.0
     prev_query_latency = 0.0
     prev_failed = 0.0
+    prev_pending = 0
+    prev_in_process = 0
     while not stop_event.is_set():
         stop_event.wait(interval_sec)
         if stop_event.is_set():
@@ -190,6 +297,9 @@ def run_aggregated_progress_logger(
         prev_queries = query_count
         prev_query_latency = total_query_latency_sec
         prev_failed = failed_count
+        incoming = interval_statements + (pending - prev_pending) + (in_process - prev_in_process)
+        prev_pending = pending
+        prev_in_process = in_process
         interval_avg_insert_ms = (interval_insert_latency_sec / interval_total * 1000.0) if interval_total > 0 else 0.0
         cumulative_avg_insert_ms = (total_insert_latency_sec / total * 1000.0) if total > 0 else 0.0
         interval_avg_query_ms = (interval_query_latency_sec / interval_q * 1000.0) if interval_q > 0 else 0.0
@@ -198,7 +308,7 @@ def run_aggregated_progress_logger(
             interval_total, interval_originals, interval_duplicates, interval_statements, interval_avg_insert_ms,
             interval_q, interval_failed, interval_avg_query_ms,
             total, originals, duplicates, insert_statements, cumulative_avg_insert_ms,
-            pending, in_process,
+            pending, in_process, incoming,
             query_count, failed_count, avg_query_latency_ms,
         )
 

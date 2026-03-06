@@ -34,7 +34,11 @@ func RunLoad(
 	ignoreSelectErrors bool,
 	ctx WorkerCtx,
 ) {
+	// Queue must hold enough for workers to batch; allow backlog so pending can grow when producers outpace workers.
 	insertionQueueMax := max3(workers*8, batchSize*workers*2, targetRPS*4)
+	if cap := targetRPS * 30; cap > insertionQueueMax {
+		insertionQueueMax = cap
+	}
 	queryQueueMax := max3(workers*4, batchSize*workers*4, targetRPS*4)
 	insertionQueue := make(chan *model.Record, insertionQueueMax)
 	queryQueue := make(chan *model.QueryJob, queryQueueMax)
@@ -70,7 +74,7 @@ func RunLoad(
 				return
 			case <-ticker.C:
 				select {
-				case pendingCh <- progress.PendingInfo{QueueLen: len(insertionQueue), BatchSize: batchSize}:
+				case pendingCh <- progress.PendingInfo{QueueLen: len(insertionQueue), BatchSize: batchSize, QueueCap: insertionQueueMax}:
 				default:
 				}
 			}
