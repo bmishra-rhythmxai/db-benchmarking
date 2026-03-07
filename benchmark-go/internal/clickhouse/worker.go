@@ -47,8 +47,8 @@ type Context struct {
 	conns  []driver.Conn
 }
 
-// Setup creates the pool, prewarms, and inits schema.
-func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error) {
+// Setup creates the pool (insert-only size when queriesPerRecord is 0, else insert+query size), prewarms, and inits schema.
+func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (worker.InsertBackend, error) {
 	if c.ch != nil {
 		log.Fatal("clickhouse Setup already called")
 	}
@@ -57,10 +57,16 @@ func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 		host = defaultHost
 	}
 	port := defaultPort
-	poolSize := numWorkers * 2
+	poolSize := numWorkers
+	if queriesPerRecord > 0 {
+		poolSize = numWorkers * 2
+	}
 	ctx := context.Background()
-	log.Printf("Creating ClickHouse connection pool at %s:%d (%d clients for %d insert + %d query workers) ...",
-		host, port, poolSize, numWorkers, numWorkers)
+	log.Printf("Creating ClickHouse connection pool at %s:%d (%d clients)",
+		host, port, poolSize)
+	if queriesPerRecord > 0 {
+		log.Printf("  for %d insert + %d query workers", numWorkers, numWorkers)
+	}
 	ch, conns, err := CreatePool(ctx, host, port, poolSize)
 	if err != nil {
 		return nil, err

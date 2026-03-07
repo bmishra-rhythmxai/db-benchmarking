@@ -35,7 +35,7 @@ type Config struct {
 
 // WorkerCtx is the interface for postgres/clickhouse (Setup, Teardown, GetMaxPatientCounter, RunQueryWorker).
 type WorkerCtx interface {
-	Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
+	Setup(numWorkers, targetRPS int, queriesPerRecord int) (worker.InsertBackend, error)
 	Teardown()
 	GetMaxPatientCounter() (int, error)
 	RunQueryWorker(workerIndex int, queryQueue <-chan *model.QueryJob, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
@@ -131,10 +131,10 @@ func (r *LoadRunner) Run() {
 	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms, duplicate_ratio=%.2f)",
 		cfg.Database, workers, producerThreads, cfg.BatchSize, cfg.DurationSec, cfg.TargetRPS, cfg.QueriesPerRecord, cfg.QueryDelaySec*1000, cfg.DuplicateRatio)
 
-	rateLimiter := rate.NewLimiter(rate.Limit(cfg.TargetRPS), cfg.TargetRPS)
+	rateLimiter := rate.NewLimiter(rate.Limit(cfg.TargetRPS), cfg.BatchSize)
 
 	var err error
-	r.backend, err = r.WorkerCtx.Setup(workers, cfg.TargetRPS)
+	r.backend, err = r.WorkerCtx.Setup(workers, cfg.TargetRPS, cfg.QueriesPerRecord)
 	if err != nil {
 		log.Fatalf("Setup: %v", err)
 	}

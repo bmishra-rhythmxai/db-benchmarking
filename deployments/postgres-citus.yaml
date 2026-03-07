@@ -10,7 +10,7 @@
 # To re-run after scaling workers: kubectl delete job citus-add-workers -n clickhouse; kubectl apply -f deployments/citus.yaml
 #
 # Benchmark: set POSTGRES_HOST=citus (or citus-coordinator) in load-runner to use this cluster.
-# Worker count: StatefulSet replicas (default 3) must match the loop in the add-workers Job (0 1 2); update both if you scale.
+# Worker count: StatefulSet replicas (default 4) must match the loop in the add-workers Job (0 1 2 3); update both if you scale.
 
 apiVersion: v1
 kind: Secret
@@ -103,6 +103,8 @@ spec:
       labels:
         app: citus-coordinator
     spec:
+      nodeSelector:
+        agentpool: default
       securityContext:
         runAsUser: 999
         fsGroup: 999
@@ -124,7 +126,7 @@ spec:
           runAsNonRoot: false
       containers:
       - name: postgres
-        image: citusdata/citus:postgres_17
+        image: devgwrxacr.azurecr.io/bikash/citus:v0.0.1
         ports:
         - containerPort: 5432
           name: postgres
@@ -205,7 +207,7 @@ metadata:
     app: citus-worker
 spec:
   serviceName: citus-workers
-  replicas: 3
+  replicas: 4
   selector:
     matchLabels:
       app: citus-worker
@@ -214,6 +216,8 @@ spec:
       labels:
         app: citus-worker
     spec:
+      nodeSelector:
+        agentpool: default
       securityContext:
         runAsUser: 999
         fsGroup: 999
@@ -235,7 +239,7 @@ spec:
           runAsNonRoot: false
       containers:
       - name: postgres
-        image: citusdata/citus:postgres_17
+        image: devgwrxacr.azurecr.io/bikash/citus:v0.0.1
         ports:
         - containerPort: 5432
           name: postgres
@@ -259,11 +263,11 @@ spec:
               key: POSTGRES_DB
         resources:
           requests:
-            cpu: 2
-            memory: 4Gi
+            cpu: 4
+            memory: 8Gi
           limits:
-            cpu: 2
-            memory: 4Gi
+            cpu: 4
+            memory: 8Gi
         volumeMounts:
         - name: data
           mountPath: /var/lib/postgresql/data
@@ -341,10 +345,12 @@ spec:
   backoffLimit: 30
   template:
     spec:
+      nodeSelector:
+        agentpool: default
       restartPolicy: OnFailure
       containers:
       - name: add-workers
-        image: citusdata/citus:postgres_17
+        image: devgwrxacr.azurecr.io/bikash/citus:v0.0.1
         command:
         - /bin/bash
         - -ec
@@ -358,7 +364,7 @@ spec:
           psql -h citus-coordinator -p 5432 -U default -d default -v ON_ERROR_STOP=1 -c \
             "SELECT citus_set_coordinator_host('citus-coordinator.clickhouse.svc.cluster.local', 5432);" || true
           # Add each worker (idempotent: ignore duplicate node errors)
-          for i in 0 1 2; do
+          for i in 0 1 2 3; do
             host="citus-worker-${i}.citus-workers.clickhouse.svc.cluster.local"
             until pg_isready -h "citus-worker-${i}.citus-workers" -p 5432 -U default -d default 2>/dev/null; do echo "waiting for ${host}..."; sleep 3; done
             psql -h citus-coordinator -p 5432 -U default -d default -v ON_ERROR_STOP=0 -c \

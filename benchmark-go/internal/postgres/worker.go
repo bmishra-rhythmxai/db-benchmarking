@@ -52,8 +52,8 @@ type Context struct {
 	selectPool *pgxpool.Pool
 }
 
-// Setup creates separate insert and select pools, prewarms, and inits schema.
-func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error) {
+// Setup creates insert pool and optionally a separate select pool (only when queriesPerRecord > 0). Prewarms and inits schema.
+func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (worker.InsertBackend, error) {
 	if c.insertPool != nil {
 		log.Fatal("postgres Setup already called")
 	}
@@ -63,8 +63,11 @@ func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 	}
 	port := defaultPort
 	ctx := context.Background()
-	log.Printf("Creating PostgreSQL connection pools at %s:%d (%d insert + %d select connections) ...",
-		host, port, numWorkers, numWorkers)
+	log.Printf("Creating PostgreSQL connection pool(s) at %s:%d (%d insert connections)",
+		host, port, numWorkers)
+	if queriesPerRecord > 0 {
+		log.Printf("  + %d select connections for query workers", numWorkers)
+	}
 	insertPool, err := CreatePool(ctx, host, port, numWorkers)
 	if err != nil {
 		return nil, err
@@ -74,20 +77,24 @@ func (c *Context) Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 		insertPool.Close()
 		return nil, err
 	}
-	selectPool, err := CreatePool(ctx, host, port, numWorkers)
-	if err != nil {
-		insertPool.Close()
-		return nil, err
-	}
-	c.selectPool = selectPool
-	if err := PrewarmPool(ctx, selectPool, numWorkers); err != nil {
-		insertPool.Close()
-		selectPool.Close()
-		return nil, err
+	if queriesPerRecord > 0 {
+		selectPool, err := CreatePool(ctx, host, port, numWorkers)
+		if err != nil {
+			insertPool.Close()
+			return nil, err
+		}
+		c.selectPool = selectPool
+		if err := PrewarmPool(ctx, selectPool, numWorkers); err != nil {
+			insertPool.Close()
+			selectPool.Close()
+			return nil, err
+		}
 	}
 	if err := InitSchema(ctx, insertPool); err != nil {
 		insertPool.Close()
-		selectPool.Close()
+		if c.selectPool != nil {
+			c.selectPool.Close()
+		}
 		return nil, err
 	}
 	log.Printf("Starting insertions (target %d rows/sec) ...", targetRPS)
@@ -106,9 +113,13 @@ func (c *Context) Teardown() {
 	}
 }
 
-// GetMaxPatientCounter returns the max patient ordinal in the DB.
+// GetMaxPatientCounter returns the max patient ordinal in the DB. Uses insert pool when select pool is not initialized.
 func (c *Context) GetMaxPatientCounter() (int, error) {
-	conn, err := c.selectPool.Acquire(context.Background())
+	pool := c.selectPool
+	if pool == nil {
+		pool = c.insertPool
+	}
+	conn, err := pool.Acquire(context.Background())
 	if err != nil {
 		return -1, err
 	}

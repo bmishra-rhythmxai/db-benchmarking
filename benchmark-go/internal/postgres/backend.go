@@ -16,6 +16,9 @@ import (
 
 const (
 	hashPartitionModulus = 8
+	// citusShardCount is used for create_distributed_table. Set to the number of Citus workers
+	// so that shards are placed one per worker (even distribution). Must match worker count.
+	citusShardCount = 4
 
 	createTableSQL = `
 CREATE TABLE IF NOT EXISTS hl7_messages (
@@ -122,14 +125,16 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	log.Printf("Table hl7_messages created with hash partitioning (modulus %d)", hashPartitionModulus)
-	// Citus: if extension is present, distribute by medical_record_number
+	// Citus: if extension is present, distribute by medical_record_number with explicit shard_count
+	// so that shards are evenly distributed (one shard per worker when citusShardCount == worker count).
+	// Hash partition modulus 8 is local to each shard; row placement is hash(mrn) -> shard.
 	var hasCitus int
 	errExt := pool.QueryRow(ctx, "SELECT 1 FROM pg_extension WHERE extname = 'citus'").Scan(&hasCitus)
 	if errExt == nil && hasCitus == 1 {
 		var alreadyDist int
 		errDist := pool.QueryRow(ctx, "SELECT 1 FROM citus_tables WHERE tablename = 'hl7_messages'").Scan(&alreadyDist)
 		if errDist != nil {
-			_, errDist = pool.Exec(ctx, "SELECT create_distributed_table('hl7_messages', 'medical_record_number')")
+			_, errDist = pool.Exec(ctx, "SELECT create_distributed_table('hl7_messages', 'medical_record_number', shard_count => $1)", citusShardCount)
 			if errDist != nil {
 				var pgErr *pgconn.PgError
 				if errors.As(errDist, &pgErr) && pgErr.Code == "42883" {
@@ -138,7 +143,7 @@ func InitSchema(ctx context.Context, pool *pgxpool.Pool) error {
 					log.Printf("Citus create_distributed_table: %v", errDist)
 				}
 			} else {
-				log.Println("Citus: distributed hl7_messages by medical_record_number")
+				log.Printf("Citus: distributed hl7_messages by medical_record_number (shard_count=%d)", citusShardCount)
 			}
 		}
 	}
