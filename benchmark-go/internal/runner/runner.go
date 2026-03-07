@@ -14,124 +14,217 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// WorkerCtx is the interface for postgres/clickhouse context (Setup, Teardown, GetMaxPatientCounter, RunQueryWorker).
+const (
+	workerQueueCap   = 10
+	progressInterval = 5 * time.Second
+)
+
+// Config holds load-run parameters. Used to construct a LoadRunner.
+type Config struct {
+	Database           string
+	DurationSec        float64
+	BatchSize          int
+	Workers            int
+	TargetRPS          int
+	QueriesPerRecord   int
+	QueryDelaySec      float64
+	ProducerThreads    int
+	IgnoreSelectErrors bool
+	DuplicateRatio     float64
+}
+
+// WorkerCtx is the interface for postgres/clickhouse (Setup, Teardown, GetMaxPatientCounter, RunQueryWorker).
 type WorkerCtx interface {
 	Setup(numWorkers, targetRPS int) (worker.InsertBackend, error)
 	Teardown()
 	GetMaxPatientCounter() (int, error)
-	RunQueryWorker(queryQueue <-chan *model.QueryJob, queryCh chan<- progress.QueryUpdate, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
+	RunQueryWorker(workerIndex int, queryQueue <-chan *model.QueryJob, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
 }
 
-// RunLoad runs the full load: producers enqueue batches in round-robin, workers consume batches and insert.
-// Insertion queue holds batches; queue cap is 2*producerThreads. No batch-wait; producers prepare full batches.
-func RunLoad(
-	database string,
-	durationSec float64,
-	batchSize int,
-	workers int,
-	targetRPS int,
-	queriesPerRecord int,
-	queryDelaySec float64,
-	producerThreads int,
-	ignoreSelectErrors bool,
-	duplicateRatio float64,
-	ctx WorkerCtx,
-) {
-	insertionQueueCap := 2 * producerThreads
-	queryQueueMax := max3(workers*4, batchSize*workers*4, targetRPS*4)
-	insertionQueue := make(chan *model.InsertPair, insertionQueueCap)
-	queryQueue := make(chan *model.QueryJob, queryQueueMax)
-	insertStartedCh := make(chan struct{}, 256)
-	insertCh := make(chan progress.InsertUpdate, 256)
-	queryCh := make(chan progress.QueryUpdate, 256)
-	resultCh := make(chan progress.Snapshot, 1)
+// Router distributes from producer queue to worker queues with rate limiting. Maintains next worker index for round-robin.
+type Router struct {
+	ProducerQueue <-chan *model.InsertPair
+	WorkerQueues   []chan *model.InsertPair
+	RateLimiter    *rate.Limiter
+	nextIndex      int
+}
 
-	runStart := time.Now()
-	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms, duplicate_ratio=%.2f)",
-		database, workers, producerThreads, batchSize, durationSec, targetRPS, queriesPerRecord, queryDelaySec*1000, duplicateRatio)
-
-	runCtx, cancelRun := context.WithTimeout(context.Background(), time.Duration(durationSec*float64(time.Second)))
-	defer cancelRun()
-
-	// Shared rate limiter: targetRPS rows/sec across all workers; burst allows initial batches.
-	burst := targetRPS * 2
-	if burst < batchSize*workers {
-		burst = batchSize * workers
+// NewRouter creates a Router. workerQueues are the per-worker queues to distribute to.
+func NewRouter(producerQueue <-chan *model.InsertPair, workerQueues []chan *model.InsertPair, rateLimiter *rate.Limiter) *Router {
+	return &Router{
+		ProducerQueue: producerQueue,
+		WorkerQueues:  workerQueues,
+		RateLimiter:   rateLimiter,
 	}
-	rateLimiter := rate.NewLimiter(rate.Limit(targetRPS), burst)
+}
 
-	backend, err := ctx.Setup(workers, targetRPS)
+// Run drains the producer queue, rate-limits, and sends to worker queues round-robin. Closes all worker queues when done.
+func (r *Router) Run() {
+	for pair := range r.ProducerQueue {
+		totalRows := len(pair.Originals) + len(pair.Duplicates)
+		if totalRows > 0 && r.RateLimiter != nil {
+			_ = r.RateLimiter.WaitN(context.Background(), totalRows)
+		}
+		idx := r.nextIndex % len(r.WorkerQueues)
+		r.nextIndex = (r.nextIndex + 1) % len(r.WorkerQueues)
+		r.WorkerQueues[idx] <- pair
+		progress.AddInsertStarted(1)
+	}
+	for i := range r.WorkerQueues {
+		close(r.WorkerQueues[i])
+	}
+}
+
+// LoadRunner holds config, backend context, and runtime state for a load run.
+type LoadRunner struct {
+	Config    Config
+	WorkerCtx WorkerCtx
+
+	// Runtime state (set by Run)
+	runStart       time.Time
+	producerQueue  chan *model.InsertPair
+	queryQueue     chan *model.QueryJob
+	workerQueues   []chan *model.InsertPair
+	doneCh         chan struct{}
+	resultCh       chan progress.Snapshot
+	runCtx         context.Context
+	cancelRun      context.CancelFunc
+	patientStart   int
+	nextID         atomic.Int64
+	backend        worker.InsertBackend
+	triggers       []chan struct{}
+	producers      []*producer.Producer
+	insertWorkers  []*worker.InsertWorker
+	progressReporter *progress.Reporter
+}
+
+// NewLoadRunner builds a LoadRunner from config and worker context. Call Run() to execute the load.
+func NewLoadRunner(cfg Config, ctx WorkerCtx) *LoadRunner {
+	return &LoadRunner{
+		Config:    cfg,
+		WorkerCtx: ctx,
+	}
+}
+
+// Run executes the full load: sets up channels and state, starts router, producers, and workers, then waits and logs summary.
+func (r *LoadRunner) Run() {
+	cfg := &r.Config
+	workers := cfg.Workers
+	producerThreads := cfg.ProducerThreads
+
+	r.runStart = time.Now()
+	producerQueueCap := max3(256, workers*workerQueueCap*2, producerThreads*32)
+	queryQueueMax := max3(workers*4, cfg.BatchSize*workers*4, cfg.TargetRPS*4)
+
+	r.producerQueue = make(chan *model.InsertPair, producerQueueCap)
+	r.queryQueue = make(chan *model.QueryJob, queryQueueMax)
+	r.doneCh = make(chan struct{})
+	r.resultCh = make(chan progress.Snapshot, 1)
+	r.runCtx, r.cancelRun = context.WithTimeout(context.Background(), time.Duration(cfg.DurationSec*float64(time.Second)))
+	defer r.cancelRun()
+
+	r.workerQueues = make([]chan *model.InsertPair, workers)
+	for i := 0; i < workers; i++ {
+		r.workerQueues[i] = make(chan *model.InsertPair, workerQueueCap)
+	}
+
+	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms, duplicate_ratio=%.2f)",
+		cfg.Database, workers, producerThreads, cfg.BatchSize, cfg.DurationSec, cfg.TargetRPS, cfg.QueriesPerRecord, cfg.QueryDelaySec*1000, cfg.DuplicateRatio)
+
+	rateLimiter := rate.NewLimiter(rate.Limit(cfg.TargetRPS), cfg.TargetRPS)
+
+	var err error
+	r.backend, err = r.WorkerCtx.Setup(workers, cfg.TargetRPS)
 	if err != nil {
 		log.Fatalf("Setup: %v", err)
 	}
-	defer ctx.Teardown()
+	defer r.WorkerCtx.Teardown()
 
-	maxCounter, _ := ctx.GetMaxPatientCounter()
-	patientStartBase := max(0, maxCounter+1)
-	var nextID atomic.Int64
-	nextID.Store(int64(patientStartBase))
-	log.Printf("Producers using atomic counter starting at %d (max in DB: %d)", patientStartBase, maxCounter)
+	maxCounter, _ := r.WorkerCtx.GetMaxPatientCounter()
+	r.patientStart = max(0, maxCounter+1)
+	r.nextID.Store(int64(r.patientStart))
+	log.Printf("Producers using atomic counter starting at %d (max in DB: %d)", r.patientStart, maxCounter)
 
-	go progress.Run(insertCh, queryCh, resultCh, insertStartedCh, 5*time.Second)
+	r.progressReporter = progress.NewReporter(progressInterval)
+	go r.progressReporter.Run(r.doneCh, r.resultCh)
+
+	router := NewRouter(r.producerQueue, r.workerQueues, rateLimiter)
+	go router.Run()
 
 	var insertExitWg sync.WaitGroup
 	insertExitWg.Add(workers)
+	r.insertWorkers = make([]*worker.InsertWorker, workers)
 	for i := 0; i < workers; i++ {
-		go worker.RunInsertWorker(backend, insertionQueue, queryQueue, insertStartedCh, insertCh, queriesPerRecord, rateLimiter, &insertExitWg)
+		r.insertWorkers[i] = worker.NewInsertWorker(i, r.backend, r.workerQueues[i], r.queryQueue, cfg.QueriesPerRecord, &insertExitWg)
+		go r.insertWorkers[i].Run()
 	}
 
 	var queryWorkersWg sync.WaitGroup
-	runQueryWorkers := queriesPerRecord > 0
+	runQueryWorkers := cfg.QueriesPerRecord > 0
 	if runQueryWorkers {
 		for i := 0; i < workers; i++ {
 			queryWorkersWg.Add(1)
+			workerIndex := i
 			go func() {
 				defer queryWorkersWg.Done()
-				ctx.RunQueryWorker(queryQueue, queryCh, queriesPerRecord, queryDelaySec, ignoreSelectErrors)
+				r.WorkerCtx.RunQueryWorker(workerIndex, r.queryQueue, cfg.QueriesPerRecord, cfg.QueryDelaySec, cfg.IgnoreSelectErrors)
 			}()
 		}
 	}
 
-	// Pre-build one InsertPair per producer in order (before any goroutines), so batch building order is deterministic.
+	// Pre-build one InsertPair per producer (order deterministic).
 	preBuilt := make([]*model.InsertPair, producerThreads)
 	for i := 0; i < producerThreads; i++ {
-		preBuilt[i] = producer.BuildInsertPair(batchSize, patientStartBase, &nextID, duplicateRatio)
+		preBuilt[i] = producer.BuildInitialPair(cfg.BatchSize, r.patientStart, &r.nextID, cfg.DuplicateRatio)
 	}
 
-	// Each producer i waits on triggers[i], then signals triggers[(i+1)%N]. Runner seeds triggers[0].
-	triggers := make([]chan struct{}, producerThreads)
-	for i := range triggers {
-		triggers[i] = make(chan struct{}, 1)
+	r.triggers = make([]chan struct{}, producerThreads)
+	for i := range r.triggers {
+		r.triggers[i] = make(chan struct{}, 1)
 	}
-	triggers[0] <- struct{}{}
+	r.triggers[0] <- struct{}{}
+
+	r.producers = make([]*producer.Producer, producerThreads)
 	var producerWg sync.WaitGroup
 	for i := 0; i < producerThreads; i++ {
+		r.producers[i] = producer.NewProducer(
+			i,
+			cfg.BatchSize,
+			r.patientStart,
+			&r.nextID,
+			cfg.DuplicateRatio,
+			preBuilt[i],
+			r.producerQueue,
+			r.triggers[i],
+			r.triggers[(i+1)%producerThreads],
+		)
 		producerWg.Add(1)
-		recvCh := triggers[i]
-		sendCh := triggers[(i+1)%producerThreads]
-		initialPair := preBuilt[i]
-		go func(recv <-chan struct{}, send chan<- struct{}, pair *model.InsertPair) {
+		go func(p *producer.Producer) {
 			defer producerWg.Done()
-			producer.Run(runCtx, insertionQueue, pair, batchSize, patientStartBase, &nextID, duplicateRatio, recv, send)
-		}(recvCh, sendCh, initialPair)
+			p.Run(r.runCtx)
+		}(r.producers[i])
 	}
+
 	producerWg.Wait()
-	close(insertionQueue)
+	close(r.producerQueue)
 	insertExitWg.Wait()
-	close(insertStartedCh)
-	close(insertCh)
 
 	if runQueryWorkers {
 		for i := 0; i < workers; i++ {
-			queryQueue <- nil
+			r.queryQueue <- nil
 		}
 		queryWorkersWg.Wait()
 	}
-	close(queryCh)
+	close(r.doneCh)
 
-	snapshot := <-resultCh
+	snapshot := <-r.resultCh
+	r.logSummary(snapshot)
+}
+
+func (r *LoadRunner) logSummary(snapshot progress.Snapshot) {
+	cfg := &r.Config
 	runEnd := time.Now()
-	elapsed := runEnd.Sub(runStart).Seconds()
+	elapsed := runEnd.Sub(r.runStart).Seconds()
 	totalInserted := int(snapshot.Inserted.Total)
 	originals := int(snapshot.Inserted.Originals)
 	duplicates := int(snapshot.Inserted.Duplicates)
@@ -155,11 +248,11 @@ func RunLoad(
 	}
 
 	log.Printf("Run finished: %d rows inserted (%d original, %d duplicate) in %.2fs (%.1f rows/sec, target %d)",
-		totalInserted, originals, duplicates, elapsed, actualRPS, targetRPS)
-
-	log.Printf("Database: %s", database)
-	log.Printf("Duration: %.2fs | Workers: %d | Rows inserted: %d (%d original, %d duplicate) | Insert statements: %d", elapsed, workers, totalInserted, originals, duplicates, insertStatements)
-	log.Printf("Actual insert rate: %.1f rows/sec (target %d)", actualRPS, targetRPS)
+		totalInserted, originals, duplicates, elapsed, actualRPS, cfg.TargetRPS)
+	log.Printf("Database: %s", cfg.Database)
+	log.Printf("Duration: %.2fs | Workers: %d | Rows inserted: %d (%d original, %d duplicate) | Insert statements: %d",
+		elapsed, cfg.Workers, totalInserted, originals, duplicates, insertStatements)
+	log.Printf("Actual insert rate: %.1f rows/sec (target %d)", actualRPS, cfg.TargetRPS)
 	if totalInserted > 0 {
 		log.Printf("Insert latency: avg %.2f ms/row", avgInsertMs)
 	}

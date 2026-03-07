@@ -4,17 +4,30 @@ package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"os"
+	"time"
 
 	"github.com/db-benchmarking/internal/clickhouse"
 	"github.com/db-benchmarking/internal/postgres"
 	"github.com/db-benchmarking/internal/runner"
 )
 
+// millisWriter prefixes each log line with timestamp in milliseconds (2006/01/02 15:04:05.000).
+type millisWriter struct{ w io.Writer }
+
+func (m *millisWriter) Write(p []byte) (n int, err error) {
+	prefix := time.Now().Format("2006/01/02 15:04:05.000 ")
+	if _, err = m.w.Write([]byte(prefix)); err != nil {
+		return 0, err
+	}
+	return m.w.Write(p)
+}
+
 func main() {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lmsgprefix)
-	log.SetOutput(os.Stdout)
+	log.SetFlags(0)
+	log.SetOutput(&millisWriter{w: os.Stdout})
 
 	database := flag.String("database", "", "postgres or clickhouse (required)")
 	duration := flag.Float64("duration", 60, "Run duration in seconds")
@@ -41,24 +54,25 @@ func main() {
 
 	queryDelaySec := *queryDelay / 1000
 
-	var ctx runner.WorkerCtx
+	var workerCtx runner.WorkerCtx
 	if *database == "postgres" {
-		ctx = &postgres.Context{}
+		workerCtx = &postgres.Context{}
 	} else {
-		ctx = &clickhouse.Context{}
+		workerCtx = &clickhouse.Context{}
 	}
 
-	runner.RunLoad(
-		*database,
-		*duration,
-		*batchSize,
-		*workers,
-		*rowsPerSecond,
-		*queriesPerRecord,
-		queryDelaySec,
-		*producers,
-		*ignoreSelectErrors,
-		*duplicateRatio,
-		ctx,
-	)
+	cfg := runner.Config{
+		Database:           *database,
+		DurationSec:        *duration,
+		BatchSize:          *batchSize,
+		Workers:            *workers,
+		TargetRPS:          *rowsPerSecond,
+		QueriesPerRecord:   *queriesPerRecord,
+		QueryDelaySec:      queryDelaySec,
+		ProducerThreads:    *producers,
+		IgnoreSelectErrors: *ignoreSelectErrors,
+		DuplicateRatio:     *duplicateRatio,
+	}
+	r := runner.NewLoadRunner(cfg, workerCtx)
+	r.Run()
 }

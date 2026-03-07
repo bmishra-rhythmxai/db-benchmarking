@@ -12,9 +12,47 @@ import (
 
 const patientMessageType = "PATIENT"
 
-// BuildInsertPair builds one InsertPair (one batch split into originals and unique duplicates).
-// Call this for each producer in order before starting producer goroutines so batch building order is deterministic.
-func BuildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *model.InsertPair {
+// Producer holds state for one producer goroutine and produces batches of records.
+// Index identifies this producer (0-based). Use NewProducer to construct.
+type Producer struct {
+	Index            int
+	BatchSize        int
+	PatientStartBase int
+	NextID           *atomic.Int64
+	DuplicateRatio   float64
+	InitialPair      *model.InsertPair
+	ProducerQueue    chan<- *model.InsertPair
+	RecvCh           <-chan struct{}
+	SendCh           chan<- struct{}
+}
+
+// NewProducer builds a Producer with the given index and config. initialPair must be pre-built for this producer (e.g. via BuildInitialPair).
+func NewProducer(
+	index int,
+	batchSize int,
+	patientStartBase int,
+	nextID *atomic.Int64,
+	duplicateRatio float64,
+	initialPair *model.InsertPair,
+	producerQueue chan<- *model.InsertPair,
+	recvCh <-chan struct{},
+	sendCh chan<- struct{},
+) *Producer {
+	return &Producer{
+		Index:            index,
+		BatchSize:        batchSize,
+		PatientStartBase: patientStartBase,
+		NextID:           nextID,
+		DuplicateRatio:   duplicateRatio,
+		InitialPair:      initialPair,
+		ProducerQueue:    producerQueue,
+		RecvCh:           recvCh,
+		SendCh:           sendCh,
+	}
+}
+
+// BuildInitialPair builds one InsertPair for a producer. Call once per producer in order before starting goroutines so batch building order is deterministic.
+func BuildInitialPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *model.InsertPair {
 	return buildInsertPair(batchSize, patientStartBase, nextID, duplicateRatio)
 }
 
@@ -67,45 +105,32 @@ func buildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, 
 	return &model.InsertPair{Originals: originals, Duplicates: duplicates}
 }
 
-// Run produces batches of records and enqueues them until ctx is cancelled.
-// initialPair is the pre-built pair for this producer (from BuildInsertPair, called in order before starting goroutines).
-// The loop only does: recv -> insert to queue -> send -> build next pair. Between recvCh and sendCh only the queue insertion runs.
-func Run(
-	ctx context.Context,
-	insertionQueue chan *model.InsertPair,
-	initialPair *model.InsertPair,
-	batchSize int,
-	patientStartBase int,
-	nextID *atomic.Int64,
-	duplicateRatio float64,
-	recvCh <-chan struct{},
-	sendCh chan<- struct{},
-) {
-	if batchSize <= 0 {
+// Run produces batches and enqueues them until ctx is cancelled.
+// Uses p.InitialPair for the first batch; builds the next pair after each send.
+func (p *Producer) Run(ctx context.Context) {
+	if p.BatchSize <= 0 {
 		return
 	}
-	pair := initialPair
+	pair := p.InitialPair
 
 	for {
 		select {
 		case <-ctx.Done():
 			select {
-			case <-recvCh:
-				sendCh <- struct{}{}
+			case <-p.RecvCh:
+				p.SendCh <- struct{}{}
 			default:
 			}
 			return
-		case <-recvCh:
+		case <-p.RecvCh:
 		}
 		if ctx.Err() != nil {
-			sendCh <- struct{}{}
+			p.SendCh <- struct{}{}
 			return
 		}
-		// Only insertion to the queue between recvCh and sendCh.
-		insertionQueue <- pair
-		sendCh <- struct{}{}
-		// Build next pair for the next iteration (outside the recv/send window).
-		pair = buildInsertPair(batchSize, patientStartBase, nextID, duplicateRatio)
+		p.ProducerQueue <- pair
+		p.SendCh <- struct{}{}
+		pair = buildInsertPair(p.BatchSize, p.PatientStartBase, p.NextID, p.DuplicateRatio)
 	}
 }
 

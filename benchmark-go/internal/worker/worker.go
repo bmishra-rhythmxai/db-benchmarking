@@ -1,7 +1,6 @@
 package worker
 
 import (
-	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/progress"
-	"golang.org/x/time/rate"
 )
 
 // RowForDB is (patient_id, message_type, json_message) for insert.
@@ -24,6 +22,105 @@ type InsertBackend interface {
 	GetConn() interface{}
 	ReleaseConn(interface{})
 	InsertBatch(conn interface{}, rows []RowForDB) (int, error)
+}
+
+// InsertWorker holds state for one insert worker goroutine. Index identifies this worker (0-based).
+type InsertWorker struct {
+	Index            int
+	Backend          InsertBackend
+	WorkerQueue      <-chan *model.InsertPair
+	QueryQueue       chan *model.QueryJob
+	QueriesPerRecord int
+	ExitWg           *sync.WaitGroup
+}
+
+// NewInsertWorker builds an InsertWorker with the given index and config.
+func NewInsertWorker(
+	index int,
+	backend InsertBackend,
+	workerQueue <-chan *model.InsertPair,
+	queryQueue chan *model.QueryJob,
+	queriesPerRecord int,
+	exitWg *sync.WaitGroup,
+) *InsertWorker {
+	return &InsertWorker{
+		Index:            index,
+		Backend:          backend,
+		WorkerQueue:      workerQueue,
+		QueryQueue:       queryQueue,
+		QueriesPerRecord: queriesPerRecord,
+		ExitWg:           exitWg,
+	}
+}
+
+// Run consumes pairs from the worker queue and inserts until the queue is closed.
+func (w *InsertWorker) Run() {
+	if w.ExitWg != nil {
+		defer w.ExitWg.Done()
+	}
+	for pair := range w.WorkerQueue {
+		w.flushPair(pair)
+	}
+}
+
+func (w *InsertWorker) flushPair(pair *model.InsertPair) {
+	if pair == nil {
+		return
+	}
+	if len(pair.Originals)+len(pair.Duplicates) == 0 {
+		return
+	}
+	conn := w.Backend.GetConn()
+	defer w.Backend.ReleaseConn(conn)
+
+	var totalRows, totalOriginals, totalDuplicates int
+	var totalLatencySec float64
+
+	if len(pair.Originals) > 0 {
+		n, nOrig, nDup, lat := w.insertBatch(conn, pair.Originals)
+		totalRows += n
+		totalOriginals += nOrig
+		totalDuplicates += nDup
+		totalLatencySec += lat
+	}
+	if len(pair.Duplicates) > 0 {
+		n, nOrig, nDup, lat := w.insertBatch(conn, pair.Duplicates)
+		totalRows += n
+		totalOriginals += nOrig
+		totalDuplicates += nDup
+		totalLatencySec += lat
+	}
+
+	latencyMicros := int64(totalLatencySec * 1e6)
+	progress.AddInsert(int64(totalRows), int64(totalOriginals), int64(totalDuplicates), latencyMicros, 1)
+}
+
+func (w *InsertWorker) insertBatch(conn interface{}, batch []*model.Record) (n int, nOriginals int, nDuplicates int, latencySec float64) {
+	rows := make([]RowForDB, len(batch))
+	for i, r := range batch {
+		rows[i] = RowForDB{r.PatientID, r.MessageType, r.JSONMessage}
+	}
+	t0 := time.Now()
+	var err error
+	n, err = w.Backend.InsertBatch(conn, rows)
+	latencySec = time.Since(t0).Seconds()
+	if err != nil {
+		log.Printf("InsertBatch error: %v", err)
+		return n, 0, 0, latencySec
+	}
+	for _, r := range batch {
+		if r.IsOriginal {
+			nOriginals++
+		}
+	}
+	nDuplicates = len(batch) - nOriginals
+	if w.QueriesPerRecord > 0 {
+		insertTime := time.Now()
+		for _, mrn := range mrnsFromBatch(batch) {
+			w.QueryQueue <- &model.QueryJob{MRN: mrn, InsertTime: insertTime}
+		}
+	}
+	return n, nOriginals, nDuplicates, latencySec
 }
 
 func mrnsFromBatch(batch []*model.Record) []string {
@@ -46,100 +143,4 @@ func mrnsFromBatch(batch []*model.Record) []string {
 		}
 	}
 	return mrns
-}
-
-// RunInsertWorker consumes insertion pairs from insertionQueue. Each pair is processed by the same worker back-to-back (originals then duplicates) on one connection to avoid commit conflicts.
-// rateLimiter is shared across workers and limits how many rows/sec are flushed (WaitN before each pair).
-// Stops when insertionQueue is closed. exitWg.Done() is called when the worker returns.
-func RunInsertWorker(
-	backend InsertBackend,
-	insertionQueue <-chan *model.InsertPair,
-	queryQueue chan *model.QueryJob,
-	insertStartedCh chan<- struct{},
-	insertCh chan<- progress.InsertUpdate,
-	queriesPerRecord int,
-	rateLimiter *rate.Limiter,
-	exitWg *sync.WaitGroup,
-) {
-	if exitWg != nil {
-		defer exitWg.Done()
-	}
-	for pair := range insertionQueue {
-		flushPair(backend, pair, queryQueue, insertStartedCh, insertCh, queriesPerRecord, rateLimiter)
-	}
-}
-
-// flushPair processes one InsertPair on a single connection: originals first, then duplicates (same worker, back-to-back commits).
-func flushPair(
-	backend InsertBackend,
-	pair *model.InsertPair,
-	queryQueue chan *model.QueryJob,
-	insertStartedCh chan<- struct{},
-	insertCh chan<- progress.InsertUpdate,
-	queriesPerRecord int,
-	rateLimiter *rate.Limiter,
-) {
-	if pair == nil {
-		return
-	}
-	totalRows := len(pair.Originals) + len(pair.Duplicates)
-	if totalRows == 0 {
-		return
-	}
-	if rateLimiter != nil {
-		_ = rateLimiter.WaitN(context.Background(), totalRows)
-	}
-	insertStartedCh <- struct{}{} // count incoming after rate limiter allowed the insertion
-	conn := backend.GetConn()
-	defer backend.ReleaseConn(conn)
-
-	// Originals first (committed first), then duplicates.
-	if len(pair.Originals) > 0 {
-		insertBatchAndReport(conn, backend, pair.Originals, queryQueue, insertCh, queriesPerRecord)
-	}
-	if len(pair.Duplicates) > 0 {
-		insertBatchAndReport(conn, backend, pair.Duplicates, queryQueue, insertCh, queriesPerRecord)
-	}
-}
-
-// insertBatchAndReport runs InsertBatch for one batch, sends InsertUpdate, and pushes MRNs to queryQueue.
-func insertBatchAndReport(
-	conn interface{},
-	backend InsertBackend,
-	batch []*model.Record,
-	queryQueue chan *model.QueryJob,
-	insertCh chan<- progress.InsertUpdate,
-	queriesPerRecord int,
-) {
-	rows := make([]RowForDB, len(batch))
-	for i, r := range batch {
-		rows[i] = RowForDB{r.PatientID, r.MessageType, r.JSONMessage}
-	}
-	t0 := time.Now()
-	n, err := backend.InsertBatch(conn, rows)
-	latency := time.Since(t0).Seconds()
-	if err != nil {
-		log.Printf("InsertBatch error: %v", err)
-		return
-	}
-	nOriginals := 0
-	for _, r := range batch {
-		if r.IsOriginal {
-			nOriginals++
-		}
-	}
-	nDuplicates := len(batch) - nOriginals
-	insertCh <- progress.InsertUpdate{
-		Total:                 float64(n),
-		Originals:             float64(nOriginals),
-		Duplicates:            float64(nDuplicates),
-		TotalInsertLatencySec: latency,
-		InsertStatements:      1,
-	}
-	if queriesPerRecord > 0 {
-		insertTime := time.Now()
-		for _, mrn := range mrnsFromBatch(batch) {
-			queryQueue <- &model.QueryJob{MRN: mrn, InsertTime: insertTime}
-		}
-	}
 }

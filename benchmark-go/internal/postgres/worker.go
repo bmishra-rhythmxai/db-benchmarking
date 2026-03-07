@@ -116,14 +116,16 @@ func (c *Context) GetMaxPatientCounter() (int, error) {
 	return GetMaxPatientCounter(context.Background(), conn)
 }
 
-// RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, sends query deltas to queryCh.
+// RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, reports via progress.AddQuery.
+// workerIndex is the 0-based index of this query worker.
 func (c *Context) RunQueryWorker(
+	workerIndex int,
 	queryQueue <-chan *model.QueryJob,
-	queryCh chan<- progress.QueryUpdate,
 	queriesPerRecord int,
 	queryDelaySec float64,
 	ignoreSelectErrors bool,
 ) {
+	_ = workerIndex // reserved for logging/tracing
 	for job := range queryQueue {
 		if job == nil {
 			return
@@ -149,12 +151,8 @@ func (c *Context) RunQueryWorker(
 				}
 			}
 		}
-		latency := time.Since(t0).Seconds()
+		latencyMicros := time.Since(t0).Microseconds()
 		conn.Release()
-		queryCh <- progress.QueryUpdate{
-			Count:           float64(queriesPerRecord),
-			TotalLatencySec: latency,
-			FailedCount:     float64(failed),
-		}
+		progress.AddQuery(int64(queriesPerRecord), latencyMicros, int64(failed))
 	}
 }
