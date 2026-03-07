@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"sync"
@@ -8,9 +9,8 @@ import (
 
 	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/progress"
+	"golang.org/x/time/rate"
 )
-
-const getPollSec = 5 * time.Millisecond
 
 // RowForDB is (patient_id, message_type, json_message) for insert.
 type RowForDB struct {
@@ -48,79 +48,69 @@ func mrnsFromBatch(batch []*model.Record) []string {
 	return mrns
 }
 
-// RunInsertWorker consumes from insertionQueue, batches by batchSize or batchWaitSec, inserts via backend, pushes MRNs to queryQueue.
-// Sends insert-started on insertStartedCh at flush start and insert deltas to insertCh on completion. Stops when it receives nil (*Record). If wg is non-nil, Done() is called after processing each item (queue drain). If exitWg is non-nil, Done() is called when the worker is about to return (after any final flush).
+// RunInsertWorker consumes insertion pairs from insertionQueue. Each pair is processed by the same worker back-to-back (originals then duplicates) on one connection to avoid commit conflicts.
+// rateLimiter is shared across workers and limits how many rows/sec are flushed (WaitN before each pair).
+// Stops when insertionQueue is closed. exitWg.Done() is called when the worker returns.
 func RunInsertWorker(
 	backend InsertBackend,
-	insertionQueue <-chan *model.Record,
+	insertionQueue <-chan *model.InsertPair,
 	queryQueue chan *model.QueryJob,
 	insertStartedCh chan<- struct{},
 	insertCh chan<- progress.InsertUpdate,
-	batchSize int,
-	batchWaitSec float64,
 	queriesPerRecord int,
-	wg *sync.WaitGroup,
+	rateLimiter *rate.Limiter,
 	exitWg *sync.WaitGroup,
 ) {
 	if exitWg != nil {
 		defer exitWg.Done()
 	}
-	var batch []*model.Record
-	batchStart := time.Now()
-	for {
-		batchElapsed := time.Since(batchStart).Seconds()
-		timeout := getPollSec
-		if batchWaitSec > batchElapsed {
-			waitLeft := time.Duration((batchWaitSec - batchElapsed) * float64(time.Second))
-			if waitLeft < timeout {
-				timeout = waitLeft
-			}
-		}
-		if timeout < time.Millisecond {
-			timeout = time.Millisecond
-		}
-
-		select {
-		case rec := <-insertionQueue:
-			if wg != nil {
-				wg.Done()
-			}
-			if rec == nil {
-				if len(batch) > 0 {
-					flush(backend, batch, queryQueue, insertStartedCh, insertCh, queriesPerRecord)
-				}
-				return
-			}
-			batch = append(batch, rec)
-			if len(batch) >= batchSize {
-				flush(backend, batch, queryQueue, insertStartedCh, insertCh, queriesPerRecord)
-				batch = nil
-				batchStart = time.Now()
-			}
-		case <-time.After(timeout):
-			if len(batch) > 0 && time.Since(batchStart).Seconds() >= batchWaitSec {
-				flush(backend, batch, queryQueue, insertStartedCh, insertCh, queriesPerRecord)
-				batch = nil
-				batchStart = time.Now()
-			}
-		}
+	for pair := range insertionQueue {
+		flushPair(backend, pair, queryQueue, insertStartedCh, insertCh, queriesPerRecord, rateLimiter)
 	}
 }
 
-func flush(
+// flushPair processes one InsertPair on a single connection: originals first, then duplicates (same worker, back-to-back commits).
+func flushPair(
 	backend InsertBackend,
-	batch []*model.Record,
+	pair *model.InsertPair,
 	queryQueue chan *model.QueryJob,
 	insertStartedCh chan<- struct{},
 	insertCh chan<- progress.InsertUpdate,
 	queriesPerRecord int,
+	rateLimiter *rate.Limiter,
 ) {
-	if len(batch) == 0 {
+	if pair == nil {
 		return
 	}
-	insertStartedCh <- struct{}{}
+	totalRows := len(pair.Originals) + len(pair.Duplicates)
+	if totalRows == 0 {
+		return
+	}
+	if rateLimiter != nil {
+		_ = rateLimiter.WaitN(context.Background(), totalRows)
+	}
+	insertStartedCh <- struct{}{} // count incoming after rate limiter allowed the insertion
 	conn := backend.GetConn()
 	defer backend.ReleaseConn(conn)
+
+	// Originals first (committed first), then duplicates.
+	if len(pair.Originals) > 0 {
+		insertBatchAndReport(conn, backend, pair.Originals, queryQueue, insertCh, queriesPerRecord)
+	}
+	if len(pair.Duplicates) > 0 {
+		insertBatchAndReport(conn, backend, pair.Duplicates, queryQueue, insertCh, queriesPerRecord)
+	}
+}
+
+// insertBatchAndReport runs InsertBatch for one batch, sends InsertUpdate, and pushes MRNs to queryQueue.
+func insertBatchAndReport(
+	conn interface{},
+	backend InsertBackend,
+	batch []*model.Record,
+	queryQueue chan *model.QueryJob,
+	insertCh chan<- progress.InsertUpdate,
+	queriesPerRecord int,
+) {
 	rows := make([]RowForDB, len(batch))
 	for i, r := range batch {
 		rows[i] = RowForDB{r.PatientID, r.MessageType, r.JSONMessage}
@@ -130,7 +120,6 @@ func flush(
 	latency := time.Since(t0).Seconds()
 	if err != nil {
 		log.Printf("InsertBatch error: %v", err)
-		insertCh <- progress.InsertUpdate{} // decrement inProcess in progress goroutine
 		return
 	}
 	nOriginals := 0

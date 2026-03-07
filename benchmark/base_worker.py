@@ -35,6 +35,21 @@ def _mrns_from_batch(batch: Batch) -> list[str]:
     return mrns
 
 
+def _unique_duplicates_from_batch(batch: Batch) -> Batch:
+    """Return unique duplicate records (is_original False), deduped by (patient_id, message_type, json_message)."""
+    seen: set[tuple[str, str, str]] = set()
+    out: Batch = []
+    for r in batch:
+        if r[3]:  # is_original
+            continue
+        key = (r[0], r[1], r[2])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(r)
+    return out
+
+
 class BaseInsertWorker(ABC):
     """Base class for database insert workers. Consumes records, batches (1s or batch_size), inserts, pushes MRNs to query_queue."""
 
@@ -95,6 +110,9 @@ class BaseInsertWorker(ABC):
                 insert_time = time.time()
                 for mrn in _mrns_from_batch(batch):
                     self.query_queue.put((mrn, insert_time))
+            # Re-queue unique duplicate records so they are inserted again (same as Go: duplicate batch).
+            for record in _unique_duplicates_from_batch(batch):
+                self.insertion_queue.put(record)
         finally:
             with self.inserted_lock:
                 self.inserted_shared[5] -= 1

@@ -55,14 +55,6 @@ type Snapshot struct {
 	Queries  QueryStats
 }
 
-// PendingInfo is sent periodically so progress can show pending insert statements (queue length / batch size).
-// QueueCap is the insertion queue capacity (max records); pending is capped at QueueCap/BatchSize.
-type PendingInfo struct {
-	QueueLen  int
-	BatchSize int
-	QueueCap  int // max records in queue; 0 means unknown
-}
-
 // InsertedStats holds aggregated insert stats (only read/written by the progress goroutine).
 type InsertedStats struct {
 	Total                 float64
@@ -80,15 +72,14 @@ type QueryStats struct {
 }
 
 // Run runs in the calling goroutine and logs insert/query progress every interval.
-// It receives deltas on insertCh and queryCh, insertStartedCh for in-flight count, and optionally pendingCh for queue depth.
-// When both insertCh and queryCh are closed and drained, it sends the final Snapshot on resultCh
-// and closes resultCh. resultCh must be buffered (e.g. capacity 1) or have a reader ready.
+// It receives deltas on insertCh and queryCh, and insertStartedCh for the incoming (batches started) count.
+// When both insertCh and queryCh are closed and drained, it sends the final Snapshot on resultCh and closes resultCh.
+// resultCh must be buffered (e.g. capacity 1) or have a reader ready.
 func Run(
 	insertCh <-chan InsertUpdate,
 	queryCh <-chan QueryUpdate,
 	resultCh chan<- Snapshot,
 	insertStartedCh <-chan struct{},
-	pendingCh <-chan PendingInfo,
 	interval time.Duration,
 ) {
 	if interval <= 0 {
@@ -96,9 +87,7 @@ func Run(
 	}
 	var inserted InsertedStats
 	var queries QueryStats
-	var inProcess int
-	var intervalInsertStarted int // insert statements that started (were queued) this interval
-	var lastPending PendingInfo
+	var intervalInsertStarted int // batches that started (incoming) this interval
 	var prevInserted InsertedStats
 	var prevQueries float64
 	var prevQueryLatency float64
@@ -113,17 +102,12 @@ func Run(
 				insertStartedCh = nil
 				continue
 			}
-			inProcess++
 			intervalInsertStarted++
 
 		case u, ok := <-insertCh:
 			if !ok {
 				insertCh = nil
 				continue
-			}
-			inProcess--
-			if inProcess < 0 {
-				inProcess = 0
 			}
 			inserted.Total += u.Total
 			inserted.Originals += u.Originals
@@ -139,13 +123,6 @@ func Run(
 			queries.Count += u.Count
 			queries.TotalLatencySec += u.TotalLatencySec
 			queries.FailedCount += u.FailedCount
-
-		case p, ok := <-pendingCh:
-			if !ok {
-				pendingCh = nil
-				continue
-			}
-			lastPending = p
 
 		case <-ticker.C:
 			total := inserted.Total
@@ -187,23 +164,15 @@ func Run(
 				intervalAvgMs = intervalQueryLatency / float64(intervalQ) * 1000
 			}
 
-			pending := 0
-			if lastPending.BatchSize > 0 {
-				pending = lastPending.QueueLen / lastPending.BatchSize
-			}
-
-			// Descriptive column names; int_ = this interval, cum_ = cumulative so "total"/"avg" etc. are unambiguous.
+			// Descriptive column names; int_ = this interval, cum_ = cumulative.
 			colW := 12
 			log.Printf("%s---%s", _colorDim, _colorReset)
-			// Insert: status (incoming first) | interval (int_) | cumulative (cum_)
-			log.Println(_colorYellow + "  Insert   " + padLeft("incoming", colW) + padLeft("pending", colW) + padLeft("in_proc", colW) + padLeft("completed", colW) + " " +
+			// Insert: incoming first, then completed this interval | interval (int_) | cumulative (cum_)
+			log.Println(_colorYellow + "  Insert   " + padLeft("incoming", colW) + padLeft("completed", colW) + " " +
 				padLeft("int_tot", colW) + padLeft("int_orig", colW) + padLeft("int_dup", colW) + padLeft("int_avg_ms", colW) + " " +
 				padLeft("cum_tot", colW) + padLeft("cum_orig", colW) + padLeft("cum_dup", colW) + padLeft("cum_avg_ms", colW) + _colorReset)
-			// Data row: 11-char prefix, then 12 columns (incoming, pending, in_proc, completed | int_* | cum_*)
-			log.Printf("           %s%*d%s%s%*d%s%s%*d%s%s%*d%s %s%*d%s%s%*d%s%s%*d%s%s%*.*f%s %s%*d%s%s%*d%s%s%*d%s%s%*.*f%s",
+			log.Printf("           %s%*d%s%s%*d%s %s%*d%s%s%*d%s%s%*d%s%s%*.*f%s %s%*d%s%s%*d%s%s%*d%s%s%*.*f%s",
 				_colorCyan, colW, intervalInsertStarted, _colorReset,
-				_colorCyan, colW, pending, _colorReset,
-				_colorCyan, colW, inProcess, _colorReset,
 				_colorCyan, colW, intervalStatements, _colorReset,
 				_colorCyan, colW, intervalTotal, _colorReset,
 				_colorCyan, colW, intervalOriginals, _colorReset,

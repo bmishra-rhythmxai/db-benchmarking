@@ -1,14 +1,17 @@
 package runner
 
 import (
+	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/producer"
 	"github.com/db-benchmarking/internal/progress"
 	"github.com/db-benchmarking/internal/worker"
+	"golang.org/x/time/rate"
 )
 
 // WorkerCtx is the interface for postgres/clickhouse context (Setup, Teardown, GetMaxPatientCounter, RunQueryWorker).
@@ -19,39 +22,43 @@ type WorkerCtx interface {
 	RunQueryWorker(queryQueue <-chan *model.QueryJob, queryCh chan<- progress.QueryUpdate, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
 }
 
-// RunLoad runs the full load: producers, insert workers, query workers, progress logger.
+// RunLoad runs the full load: producers enqueue batches in round-robin, workers consume batches and insert.
+// Insertion queue holds batches; queue cap is 2*producerThreads. No batch-wait; producers prepare full batches.
 func RunLoad(
 	database string,
 	durationSec float64,
 	batchSize int,
-	batchWaitSec float64,
 	workers int,
-	patientCount int,
 	targetRPS int,
 	queriesPerRecord int,
 	queryDelaySec float64,
 	producerThreads int,
 	ignoreSelectErrors bool,
+	duplicateRatio float64,
 	ctx WorkerCtx,
 ) {
-	// Queue must hold enough for workers to batch; allow backlog so pending can grow when producers outpace workers.
-	insertionQueueMax := max3(workers*8, batchSize*workers*2, targetRPS*4)
-	if cap := targetRPS * 30; cap > insertionQueueMax {
-		insertionQueueMax = cap
-	}
+	insertionQueueCap := 2 * producerThreads
 	queryQueueMax := max3(workers*4, batchSize*workers*4, targetRPS*4)
-	insertionQueue := make(chan *model.Record, insertionQueueMax)
+	insertionQueue := make(chan *model.InsertPair, insertionQueueCap)
 	queryQueue := make(chan *model.QueryJob, queryQueueMax)
 	insertStartedCh := make(chan struct{}, 256)
 	insertCh := make(chan progress.InsertUpdate, 256)
 	queryCh := make(chan progress.QueryUpdate, 256)
 	resultCh := make(chan progress.Snapshot, 1)
-	pendingCh := make(chan progress.PendingInfo, 1)
-	donePending := make(chan struct{})
 
 	runStart := time.Now()
-	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, batch_wait_sec=%.1f, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
-		database, workers, producerThreads, batchSize, batchWaitSec, durationSec, targetRPS, queriesPerRecord, queryDelaySec*1000)
+	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms, duplicate_ratio=%.2f)",
+		database, workers, producerThreads, batchSize, durationSec, targetRPS, queriesPerRecord, queryDelaySec*1000, duplicateRatio)
+
+	runCtx, cancelRun := context.WithTimeout(context.Background(), time.Duration(durationSec*float64(time.Second)))
+	defer cancelRun()
+
+	// Shared rate limiter: targetRPS rows/sec across all workers; burst allows initial batches.
+	burst := targetRPS * 2
+	if burst < batchSize*workers {
+		burst = batchSize * workers
+	}
+	rateLimiter := rate.NewLimiter(rate.Limit(targetRPS), burst)
 
 	backend, err := ctx.Setup(workers, targetRPS)
 	if err != nil {
@@ -61,33 +68,16 @@ func RunLoad(
 
 	maxCounter, _ := ctx.GetMaxPatientCounter()
 	patientStartBase := max(0, maxCounter+1)
-	patientStartStride := 10_000_000
-	log.Printf("Producers starting from patient counter %d (max in DB: %d)", patientStartBase, maxCounter)
+	var nextID atomic.Int64
+	nextID.Store(int64(patientStartBase))
+	log.Printf("Producers using atomic counter starting at %d (max in DB: %d)", patientStartBase, maxCounter)
 
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-donePending:
-				close(pendingCh)
-				return
-			case <-ticker.C:
-				select {
-				case pendingCh <- progress.PendingInfo{QueueLen: len(insertionQueue), BatchSize: batchSize, QueueCap: insertionQueueMax}:
-				default:
-				}
-			}
-		}
-	}()
+	go progress.Run(insertCh, queryCh, resultCh, insertStartedCh, 5*time.Second)
 
-	go progress.Run(insertCh, queryCh, resultCh, insertStartedCh, pendingCh, 5*time.Second)
-
-	var insertWg sync.WaitGroup
 	var insertExitWg sync.WaitGroup
 	insertExitWg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go worker.RunInsertWorker(backend, insertionQueue, queryQueue, insertStartedCh, insertCh, batchSize, batchWaitSec, queriesPerRecord, &insertWg, &insertExitWg)
+		go worker.RunInsertWorker(backend, insertionQueue, queryQueue, insertStartedCh, insertCh, queriesPerRecord, rateLimiter, &insertExitWg)
 	}
 
 	var queryWorkersWg sync.WaitGroup
@@ -102,33 +92,32 @@ func RunLoad(
 		}
 	}
 
-	perProducer := targetRPS / producerThreads
-	remainder := targetRPS % producerThreads
+	// Pre-build one InsertPair per producer in order (before any goroutines), so batch building order is deterministic.
+	preBuilt := make([]*model.InsertPair, producerThreads)
+	for i := 0; i < producerThreads; i++ {
+		preBuilt[i] = producer.BuildInsertPair(batchSize, patientStartBase, &nextID, duplicateRatio)
+	}
+
+	// Each producer i waits on triggers[i], then signals triggers[(i+1)%N]. Runner seeds triggers[0].
+	triggers := make([]chan struct{}, producerThreads)
+	for i := range triggers {
+		triggers[i] = make(chan struct{}, 1)
+	}
+	triggers[0] <- struct{}{}
 	var producerWg sync.WaitGroup
 	for i := 0; i < producerThreads; i++ {
-		rps := perProducer
-		if i < remainder {
-			rps++
-		}
-		if rps <= 0 {
-			continue
-		}
 		producerWg.Add(1)
-		start := patientStartBase + i*patientStartStride
-		go func(rps, start int) {
+		recvCh := triggers[i]
+		sendCh := triggers[(i+1)%producerThreads]
+		initialPair := preBuilt[i]
+		go func(recv <-chan struct{}, send chan<- struct{}, pair *model.InsertPair) {
 			defer producerWg.Done()
-			producer.Run(durationSec, patientCount, insertionQueue, rps, start, 0, &insertWg)
-		}(rps, start)
+			producer.Run(runCtx, insertionQueue, pair, batchSize, patientStartBase, &nextID, duplicateRatio, recv, send)
+		}(recvCh, sendCh, initialPair)
 	}
 	producerWg.Wait()
-
-	for i := 0; i < workers; i++ {
-		insertWg.Add(1)
-		insertionQueue <- nil
-	}
-	insertWg.Wait()
-	insertExitWg.Wait() // wait for all workers to finish their final flush and return before closing channels
-	close(donePending)
+	close(insertionQueue)
+	insertExitWg.Wait()
 	close(insertStartedCh)
 	close(insertCh)
 

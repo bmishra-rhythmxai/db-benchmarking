@@ -1,9 +1,10 @@
 package producer
 
 import (
+	"context"
 	"encoding/json"
-	"sync"
-	"time"
+	"math/rand"
+	"sync/atomic"
 
 	"github.com/db-benchmarking/internal/model"
 	"github.com/db-benchmarking/internal/patientgen"
@@ -11,66 +12,100 @@ import (
 
 const patientMessageType = "PATIENT"
 
-const defaultDuplicateRatio = 0.25
+// BuildInsertPair builds one InsertPair (one batch split into originals and unique duplicates).
+// Call this for each producer in order before starting producer goroutines so batch building order is deterministic.
+func BuildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *model.InsertPair {
+	return buildInsertPair(batchSize, patientStartBase, nextID, duplicateRatio)
+}
 
-// Run enqueues records at targetRPS until durationSec elapses, then sends numSentinels sentinels (nil).
-// If wg is non-nil, Add(1) is called before each put so callers can Wait() until queue is drained.
-func Run(
-	durationSec float64,
-	patientCount int,
-	insertionQueue chan *model.Record,
-	targetRPS int,
-	patientStart int,
-	numSentinels int,
-	wg *sync.WaitGroup,
-) {
-	put := func(rec *model.Record) {
-		if wg != nil {
-			wg.Add(1)
+func buildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *model.InsertPair {
+	batch := make([]*model.Record, 0, batchSize)
+	for len(batch) < batchSize {
+		var ordinal int
+		var isOriginal bool
+		if rand.Float64() < duplicateRatio {
+			existingMax := nextID.Load() - 1
+			if existingMax < int64(patientStartBase) {
+				ordinal = int(nextID.Add(1) - 1)
+				isOriginal = true
+			} else {
+				ordinal = patientStartBase + rand.Intn(int(existingMax)-patientStartBase+1)
+				isOriginal = false
+			}
+		} else {
+			ordinal = int(nextID.Add(1) - 1)
+			isOriginal = true
 		}
-		insertionQueue <- rec
-	}
-	if targetRPS <= 0 {
-		for i := 0; i < numSentinels; i++ {
-			put(nil)
-		}
-		return
-	}
-	intervalSec := 1.0 / float64(targetRPS)
-	start := time.Now()
-	deadline := start.Add(time.Duration(durationSec * float64(time.Second)))
-	nextPutAt := start
-	patientRecords := make([]patientgen.PatientRecord, 0)
-	nUnique := max(1, int(float64(patientCount)*(1-defaultDuplicateRatio)))
-
-	for time.Now().Before(deadline) {
-		now := time.Now()
-		if now.Before(nextPutAt) {
-			time.Sleep(time.Until(nextPutAt))
-			continue
-		}
-		if len(patientRecords) == 0 {
-			patientRecords = patientgen.GenerateBulkPatients(patientStart, patientCount, defaultDuplicateRatio)
-			patientStart += nUnique
-		}
-		p := patientRecords[0]
-		patientRecords = patientRecords[1:]
+		p := patientgen.GenerateOnePatient(ordinal, isOriginal)
 		jsonMsg, _ := p.ToJSON()
-		rec := &model.Record{
+		batch = append(batch, &model.Record{
 			PatientID:   p.PatientID,
 			MessageType: patientMessageType,
 			JSONMessage: jsonMsg,
 			IsOriginal:  p.IsOriginal,
-		}
-		put(rec)
-		nextPutAt = nextPutAt.Add(time.Duration(intervalSec * float64(time.Second)))
-		if nextPutAt.Before(now) {
-			nextPutAt = now.Add(time.Duration(intervalSec * float64(time.Second)))
+		})
+	}
+	var originals []*model.Record
+	for _, r := range batch {
+		if r != nil && r.IsOriginal {
+			originals = append(originals, r)
 		}
 	}
+	seen := make(map[string]struct{})
+	var duplicates []*model.Record
+	for _, r := range batch {
+		if r == nil || r.IsOriginal {
+			continue
+		}
+		key := r.PatientID + "\x00" + r.MessageType + "\x00" + r.JSONMessage
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		duplicates = append(duplicates, r)
+	}
+	return &model.InsertPair{Originals: originals, Duplicates: duplicates}
+}
 
-	for i := 0; i < numSentinels; i++ {
-		put(nil)
+// Run produces batches of records and enqueues them until ctx is cancelled.
+// initialPair is the pre-built pair for this producer (from BuildInsertPair, called in order before starting goroutines).
+// The loop only does: recv -> insert to queue -> send -> build next pair. Between recvCh and sendCh only the queue insertion runs.
+func Run(
+	ctx context.Context,
+	insertionQueue chan *model.InsertPair,
+	initialPair *model.InsertPair,
+	batchSize int,
+	patientStartBase int,
+	nextID *atomic.Int64,
+	duplicateRatio float64,
+	recvCh <-chan struct{},
+	sendCh chan<- struct{},
+) {
+	if batchSize <= 0 {
+		return
+	}
+	pair := initialPair
+
+	for {
+		select {
+		case <-ctx.Done():
+			select {
+			case <-recvCh:
+				sendCh <- struct{}{}
+			default:
+			}
+			return
+		case <-recvCh:
+		}
+		if ctx.Err() != nil {
+			sendCh <- struct{}{}
+			return
+		}
+		// Only insertion to the queue between recvCh and sendCh.
+		insertionQueue <- pair
+		sendCh <- struct{}{}
+		// Build next pair for the next iteration (outside the recv/send window).
+		pair = buildInsertPair(batchSize, patientStartBase, nextID, duplicateRatio)
 	}
 }
 

@@ -5,10 +5,12 @@ import logging
 import queue
 import threading
 import time
+from multiprocessing import Value
 from typing import Any
 
 from .config import INSERTION_SENTINEL, QUERY_SENTINEL
-from .producer import run_producer
+from .patient_generator import DUPLICATE_RATIO
+from .producer import build_one_batch, run_batch_producer, run_producer
 from .progress import run_progress_logger, run_progress_reporter
 
 logger = logging.getLogger(__name__)
@@ -60,17 +62,17 @@ def run_load(
     batch_size: int,
     batch_wait_sec: float,
     workers: int,
-    patient_count: int,
     target_rps: int,
     queries_per_record: int,
     query_delay_sec: float = 0.0,
     producer_threads: int = 1,
     total_records: int | None = None,
-    patient_start: int | None = None,
     progress_queue: Any = None,
     process_index: int | None = None,
     start_barrier: Any = None,
     ignore_select_errors: bool = False,
+    next_id: Any = None,
+    patient_start_base: int | None = None,
 ) -> None:
     num_workers = workers
     # Queue must hold enough for workers to fill batches without producer blocking; otherwise
@@ -90,8 +92,8 @@ def run_load(
     run_start = time.perf_counter()
 
     use_fixed_count = total_records is not None
-    if use_fixed_count and patient_start is None:
-        raise ValueError("patient_start is required when total_records is set")
+    if use_fixed_count and (next_id is None or patient_start_base is None):
+        raise ValueError("next_id and patient_start_base are required when total_records is set")
 
     logger.info(
         "Connecting to %s (workers=%d, producers=%d, batch_size=%d, batch_wait_sec=%.1f, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms)",
@@ -112,13 +114,7 @@ def run_load(
     run_query_workers = queries_per_record > 0
 
     if use_fixed_count:
-        patient_start_base = patient_start  # type: ignore[assignment]
-        logger.info("Fixed-count mode: producing %d records starting at patient counter %d", total_records, patient_start_base)
-    else:
-        max_counter = worker_ctx.get_max_patient_counter()
-        patient_start_base = max(0, max_counter + 1)
-        patient_start_stride = 10_000_000
-        logger.info("Producers starting from patient counter %d (max in DB: %d)", patient_start_base, max_counter)
+        logger.info("Fixed-count mode: producing %d records using atomic counter (base %d)", total_records, patient_start_base)
 
     # Wait for all processes to finish pool setup and prewarm before any start the load generator
     if start_barrier is not None:
@@ -163,39 +159,56 @@ def run_load(
     progress_thread.start()
 
     if use_fixed_count:
-        # One producer per process: produce exactly total_records at target_rps
+        # One producer per process: produce exactly total_records at target_rps using shared atomic counter
         run_producer(
             duration_sec=0.0,
-            patient_count=patient_count,
             insertion_queue=insertion_queue,
             num_workers=num_workers,
             target_rps=target_rps,
-            patient_start=patient_start_base,
+            patient_start_base=patient_start_base,
+            next_id=next_id,
             sentinels=num_workers,
             max_records=total_records,
         )
     else:
-        # Split target_rps across producer threads so total ≈ target_rps
-        per_producer = target_rps // producer_threads
-        remainder = target_rps % producer_threads
+        # Duration-based: pre-build one batch per producer in order (before any threads), then round-robin: signal -> insert batch -> signal next -> build next.
+        max_counter = worker_ctx.get_max_patient_counter()
+        local_base = max(0, max_counter + 1)
+        local_next_id: Any = Value("q", local_base)
+        logger.info("Producers using atomic counter starting at %d (max in DB: %d)", local_base, max_counter)
 
-        def producer_target(producer_index: int) -> None:
-            rps = per_producer + (1 if producer_index < remainder else 0)
-            if rps <= 0:
-                return
-            start = patient_start_base + producer_index * patient_start_stride
-            run_producer(
-                duration_sec,
-                patient_count,
-                insertion_queue,
-                num_workers,
-                target_rps=rps,
-                patient_start=start,
-                sentinels=0,
+        pre_built: list[list[Record]] = [
+            build_one_batch(batch_size, local_base, local_next_id, DUPLICATE_RATIO)
+            for _ in range(producer_threads)
+        ]
+
+        producer_stop = threading.Event()
+
+        def stop_after_duration() -> None:
+            time.sleep(duration_sec)
+            producer_stop.set()
+
+        duration_thread = threading.Thread(target=stop_after_duration, daemon=True)
+        duration_thread.start()
+
+        triggers: list[queue.Queue[None]] = [queue.Queue(maxsize=1) for _ in range(producer_threads)]
+        triggers[0].put(None)
+
+        def batch_producer_target(producer_index: int) -> None:
+            run_batch_producer(
+                insertion_queue=insertion_queue,
+                initial_batch=pre_built[producer_index],
+                batch_size=batch_size,
+                patient_start_base=local_base,
+                next_id=local_next_id,
+                recv_trigger=triggers[producer_index],
+                send_trigger=triggers[(producer_index + 1) % producer_threads],
+                stop_event=producer_stop,
+                duplicate_ratio=DUPLICATE_RATIO,
             )
 
         producer_threads_list = [
-            threading.Thread(target=producer_target, args=(i,), daemon=True)
+            threading.Thread(target=batch_producer_target, args=(i,), daemon=True)
             for i in range(producer_threads)
         ]
         for p in producer_threads_list:
@@ -203,7 +216,6 @@ def run_load(
         for p in producer_threads_list:
             p.join()
 
-        # Single producer puts sentinels; multi-producer: we put them here once
         for _ in range(num_workers):
             insertion_queue.put(INSERTION_SENTINEL)
 

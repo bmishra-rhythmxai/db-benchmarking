@@ -13,6 +13,7 @@ import threading
 
 from benchmark.runner import ensure_schema_from_db, get_max_patient_counter_from_db, run_load
 from benchmark.progress import run_aggregated_progress_logger
+from multiprocessing import Value
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,19 +29,19 @@ def _run_load_process(
     batch_size: int,
     batch_wait_sec: float,
     workers: int,
-    patient_count: int,
     rows_per_second: int,
     queries_per_record: int,
     query_delay_sec: float,
     processes: int,
     total_records: int,
-    patient_start: int,
+    next_id: Value,
+    patient_start_base: int,
     process_index: int,
-    progress_queue: multiprocessing.Queue | None,
-    start_barrier: multiprocessing.Barrier | None,
+    progress_queue: multiprocessing.Queue,
+    start_barrier: multiprocessing.Barrier,
     ignore_select_errors: bool = False,
 ) -> None:
-    """Target for one child process: run_load with fixed total_records and patient_start. 1 producer per process."""
+    """Target for one child process: run_load with fixed total_records and shared atomic counter (always 2+ processes)."""
     records_this_process = total_records // processes + (1 if process_index < total_records % processes else 0)
     rps_this_process = rows_per_second // processes + (1 if process_index < rows_per_second % processes else 0)
     if records_this_process <= 0:
@@ -51,17 +52,17 @@ def _run_load_process(
         batch_size=batch_size,
         batch_wait_sec=batch_wait_sec,
         workers=workers,
-        patient_count=patient_count,
         target_rps=rps_this_process,
         queries_per_record=queries_per_record,
         query_delay_sec=query_delay_sec,
         producer_threads=1,
         total_records=records_this_process,
-        patient_start=patient_start,
         progress_queue=progress_queue,
         process_index=process_index,
         start_barrier=start_barrier,
         ignore_select_errors=ignore_select_errors,
+        next_id=next_id,
+        patient_start_base=patient_start_base,
     )
 
 
@@ -90,12 +91,6 @@ def main() -> None:
         help="Number of worker threads per process; each worker uses one connection from the pool",
     )
     p.add_argument(
-        "--patient-count",
-        type=int,
-        default=1000,
-        help="Number of patient IDs to generate for load",
-    )
-    p.add_argument(
         "--rows-per-second",
         type=int,
         default=1000,
@@ -105,7 +100,7 @@ def main() -> None:
         "--processes",
         type=int,
         default=4,
-        help="Number of processes; total records (duration * rows-per-second) are divided uniformly, 1 producer per process",
+        help="Number of processes (minimum 2); total records divided uniformly, 1 producer per process",
     )
     p.add_argument(
         "--queries-per-record",
@@ -128,8 +123,8 @@ def main() -> None:
 
     if args.workers < 1:
         p.error("--workers must be >= 1")
-    if args.processes < 1:
-        p.error("--processes must be >= 1")
+    if args.processes < 2:
+        p.error("--processes must be >= 2")
     if args.batch_wait_sec <= 0:
         p.error("--batch-wait-sec must be > 0")
 
@@ -137,41 +132,27 @@ def main() -> None:
     if total_records <= 0:
         p.error("total records (duration * rows-per-second) must be >= 1")
 
-    # Single connection to compute max patient counter; then divide record range across processes
+    # Single connection to compute max patient counter; shared atomic counter for all processes
     max_counter = get_max_patient_counter_from_db(args.database)
-    base_start = max(0, max_counter + 1)
-
-    # When using multiple processes, init schema once in parent so children skip it (avoids DDL deadlock)
-    if args.processes > 1:
-        ensure_schema_from_db(args.database)
-    records_per_process_list = [
-        total_records // args.processes + (1 if i < total_records % args.processes else 0)
-        for i in range(args.processes)
-    ]
-    patient_starts = [base_start]
-    for i in range(1, args.processes):
-        patient_starts.append(patient_starts[-1] + records_per_process_list[i - 1])
+    patient_start_base = max(0, max_counter + 1)
+    next_id = Value("q", patient_start_base)
 
     logger.info(
-        "Total records %d over %d processes (1 producer per process); starts %s",
-        total_records, args.processes, patient_starts,
+        "Total records %d over %d processes (1 producer per process); atomic counter from %d",
+        total_records, args.processes, patient_start_base,
     )
 
-    progress_queue: multiprocessing.Queue | None = None
-    progress_stop: threading.Event | None = None
-    progress_thread: threading.Thread | None = None
-    start_barrier: multiprocessing.Barrier | None = None
-    if args.processes > 1:
-        progress_queue = multiprocessing.Queue()
-        progress_stop = threading.Event()
-        # Parent + N children = N+1; parent waits on barrier after spawn, then starts progress
-        start_barrier = multiprocessing.Barrier(args.processes + 1)
-        progress_thread = threading.Thread(
-            target=run_aggregated_progress_logger,
-            args=(progress_queue, args.processes, progress_stop),
-            kwargs={"interval_sec": 5.0, "batch_size": args.batch_size},
-            daemon=True,
-        )
+    ensure_schema_from_db(args.database)
+
+    progress_queue = multiprocessing.Queue()
+    progress_stop = threading.Event()
+    start_barrier = multiprocessing.Barrier(args.processes + 1)
+    progress_thread = threading.Thread(
+        target=run_aggregated_progress_logger,
+        args=(progress_queue, args.processes, progress_stop),
+        kwargs={"interval_sec": 5.0, "batch_size": args.batch_size},
+        daemon=True,
+    )
 
     procs = [
         multiprocessing.Process(
@@ -182,13 +163,13 @@ def main() -> None:
                 args.batch_size,
                 args.batch_wait_sec,
                 args.workers,
-                args.patient_count,
                 args.rows_per_second,
                 args.queries_per_record,
                 args.query_delay / 1000.0,
                 args.processes,
                 total_records,
-                patient_starts[i],
+                next_id,
+                patient_start_base,
                 i,
                 progress_queue,
                 start_barrier,
@@ -199,17 +180,13 @@ def main() -> None:
     ]
     for proc in procs:
         proc.start()
-    # Wait for all children to finish pool setup and prewarm before starting progress output
-    if start_barrier is not None:
-        start_barrier.wait()
-    if progress_thread is not None:
-        progress_thread.start()
+    start_barrier.wait()
+    progress_thread.start()
     for proc in procs:
         proc.join()
 
-    if progress_stop is not None and progress_thread is not None:
-        progress_stop.set()
-        progress_thread.join(timeout=6.0)
+    progress_stop.set()
+    progress_thread.join(timeout=6.0)
     failed = [i for i, proc in enumerate(procs) if proc.exitcode != 0]
     if failed:
         raise SystemExit(f"Process(es) {failed} exited with non-zero status")

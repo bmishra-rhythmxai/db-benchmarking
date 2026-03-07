@@ -63,6 +63,48 @@ var firstNames = []string{"John", "Jane", "Bob", "Alice", "Charlie", "Diana", "E
 var lastNames = []string{"Smith", "Doe", "Brown", "Johnson", "Williams", "Jones", "Garcia", "Miller", "Davis", "Wilson"}
 var genders = []string{"male", "female", "other"}
 
+// GenerateOnePatient creates a single patient record for the given ordinal.
+// isOriginal marks whether this is the first record for this patient (true) or a duplicate (false).
+func GenerateOnePatient(ordinal int, isOriginal bool) PatientRecord {
+	baseSource := payloadPool[rand.Intn(len(payloadPool))]
+	ord := formatOrdinal(ordinal)
+	mrn := "MRN-" + ord
+	pid := "patient-" + ord
+	namePrefix := "Mr"
+	if ordinal%2 != 0 {
+		namePrefix = "Ms"
+	}
+	nameSuffix := interface{}(nil)
+	if ordinal%4 == 0 {
+		nameSuffix = "Jr"
+	}
+	return PatientRecord{
+		IsOriginal:               isOriginal,
+		FHIRID:                   pid,
+		RXPatientID:              "rx-" + pid,
+		Source:                   baseSource,
+		PatientID:                pid,
+		MedicalRecordNumber:      mrn,
+		NamePrefix:               namePrefix,
+		LastName:                 lastNames[ordinal%len(lastNames)],
+		FirstName:                firstNames[ordinal%len(firstNames)],
+		NameSuffix:               nameSuffix,
+		DateOfBirth:              formatDateOfBirth(1980+(ordinal%40), (ordinal%12)+1, (ordinal%28)+1),
+		GenderAdministrative:     genders[ordinal%3],
+		FHIRGenderAdministrative: genders[ordinal%3],
+		GenderIdentity:           capitalize(genders[ordinal%3]),
+		FHIRGenderIdentity:       genders[ordinal%3],
+		MaritalStatus:            boolToMarital(ordinal%2 == 0),
+		FHIRMaritalStatus:        boolToFHIRMarital(ordinal%2 == 0),
+		RaceDisplay:              boolToRace(ordinal%3 == 0),
+		FHIRRaceDisplay:          boolToFHIRRace(ordinal%3 == 0),
+		EthnicityDisplay:         "Not Hispanic or Latino",
+		FHIREthnicityDisplay:     "2186-5",
+		SexAtBirth:               boolToSex(ordinal%2 == 0),
+		IsPregnant:               "false",
+	}
+}
+
 // GenerateBulkPatients generates total patient records with duplicates.
 // start is the starting counter for MRN/patient IDs. duplicateRatio (e.g. 0.25) controls duplicates.
 func GenerateBulkPatients(start, total int, duplicateRatio float64) []PatientRecord {
@@ -71,48 +113,11 @@ func GenerateBulkPatients(start, total int, duplicateRatio float64) []PatientRec
 		nUnique = 1
 	}
 	patients := make([]PatientRecord, 0, total)
-	baseSource := payloadPool[rand.Intn(len(payloadPool))]
-
 	for i := 0; i < nUnique; i++ {
-		ordinal := formatOrdinal(start + i)
-		mrn := "MRN-" + ordinal
-		pid := "patient-" + ordinal
-		namePrefix := "Mr"
-		if i%2 != 0 {
-			namePrefix = "Ms"
-		}
-		nameSuffix := interface{}(nil)
-		if i%4 == 0 {
-			nameSuffix = "Jr"
-		}
-		patients = append(patients, PatientRecord{
-			IsOriginal:               true,
-			FHIRID:                   pid,
-			RXPatientID:              "rx-" + pid,
-			Source:                   baseSource,
-			PatientID:                pid,
-			MedicalRecordNumber:      mrn,
-			NamePrefix:               namePrefix,
-			LastName:                 lastNames[i%len(lastNames)],
-			FirstName:                firstNames[i%len(firstNames)],
-			NameSuffix:               nameSuffix,
-			DateOfBirth:              formatDateOfBirth(1980+(i%40), (i%12)+1, (i%28)+1),
-			GenderAdministrative:     genders[i%3],
-			FHIRGenderAdministrative: genders[i%3],
-			GenderIdentity:           capitalize(genders[i%3]),
-			FHIRGenderIdentity:       genders[i%3],
-			MaritalStatus:            boolToMarital(i%2 == 0),
-			FHIRMaritalStatus:        boolToFHIRMarital(i%2 == 0),
-			RaceDisplay:              boolToRace(i%3 == 0),
-			FHIRRaceDisplay:          boolToFHIRRace(i%3 == 0),
-			EthnicityDisplay:         "Not Hispanic or Latino",
-			FHIREthnicityDisplay:     "2186-5",
-			SexAtBirth:               boolToSex(i%2 == 0),
-			IsPregnant:               "false",
-		})
+		patients = append(patients, GenerateOnePatient(start+i, true))
 	}
-
 	nDuplicates := total - nUnique
+	baseSource := payloadPool[rand.Intn(len(payloadPool))]
 	for j := 0; j < nDuplicates; j++ {
 		dup := patients[j%nUnique]
 		dup.IsOriginal = false
