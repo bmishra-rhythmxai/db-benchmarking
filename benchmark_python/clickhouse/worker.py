@@ -112,8 +112,9 @@ class ClickHouseAsyncWorker(BaseAsyncInsertWorker):
     async def release_connection(self, conn: Any) -> None:
         await self.client_queue.put(conn)
 
-    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
-        return await self.loop.run_in_executor(None, lambda: backend.insert_batch(conn, batch))
+    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int]:
+        n = await self.loop.run_in_executor(None, lambda: backend.insert_batch(conn, batch))
+        return n, 1
 
 
 async def run_query_worker_clickhouse_async(

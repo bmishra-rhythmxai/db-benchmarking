@@ -35,6 +35,13 @@ $1 ~ /^(sda|sdb)/ {
   printf "%-10s %-10f %-10f %-10f %-10f %-10f %-10f %-10f\n", $1, $2, $3, $6, $8, $9, $12, $23
 }'
 
+TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/pgbouncer --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
+export TAG=v0.0.1
+docker build -t devgwrxacr.azurecr.io/bikash/pgbouncer:${TAG} -f debian-12/Dockerfile .
+docker push devgwrxacr.azurecr.io/bikash/pgbouncer:${TAG}
+sed -i '' "s|devgwrxacr.azurecr.io/bikash/pgbouncer:.*|devgwrxacr.azurecr.io/bikash/pgbouncer:${TAG}|" deployments/postgres.yaml
+k apply -f deployments/postgres.yaml
+
 TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/postgres --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
 docker build -t devgwrxacr.azurecr.io/bikash/postgres:${TAG} -f Dockerfile.postgres .
 docker push devgwrxacr.azurecr.io/bikash/postgres:${TAG}

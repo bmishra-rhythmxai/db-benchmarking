@@ -51,13 +51,14 @@ def _worker_for_database(database: str):
     return clickhouse.ClickHouseWorker
 
 
-async def get_max_patient_counter_from_db_async(database: str) -> int:
+async def get_max_patient_counter_from_db_async(database: str, pgbouncer_enabled: bool = False) -> int:
     import os
     if database == "postgres":
         from .postgres import backend_async as pg_backend
         host = os.environ.get("POSTGRES_HOST") or "localhost"
-        port = 5432
-        return await pg_backend.get_max_patient_counter_standalone(host, port)
+        port = int(os.environ.get("POSTGRES_PORT") or "5432")
+        db_name = "postgres1" if pgbouncer_enabled else "postgres"
+        return await pg_backend.get_max_patient_counter_standalone(host, port, database=db_name)
     from .clickhouse import backend as ch_backend
     host = os.environ.get("CLICKHOUSE_HOST") or "clickhouse"
     port = int(os.environ.get("CLICKHOUSE_PORT") or "9000")
@@ -67,13 +68,14 @@ async def get_max_patient_counter_from_db_async(database: str) -> int:
     )
 
 
-async def ensure_schema_from_db_async(database: str) -> None:
+async def ensure_schema_from_db_async(database: str, pgbouncer_enabled: bool = False) -> None:
     import os
     if database == "postgres":
         from .postgres import backend_async as pg_backend
         host = os.environ.get("POSTGRES_HOST") or "localhost"
-        port = 5432
-        await pg_backend.init_schema_standalone(host, port)
+        port = int(os.environ.get("POSTGRES_PORT") or "5432")
+        db_name = "postgres1" if pgbouncer_enabled else "postgres"
+        await pg_backend.init_schema_standalone(host, port, database=db_name)
         return
     from .clickhouse import backend as ch_backend
     host = os.environ.get("CLICKHOUSE_HOST") or "clickhouse"
@@ -95,6 +97,7 @@ async def async_run_load(
     ignore_select_errors: bool = False,
     duplicate_ratio: float = 0.25,
     shutdown_event: asyncio.Event | None = None,
+    pgbouncer_enabled: bool = False,
 ) -> None:
     """Async load: asyncio queues, async workers and producers, single process. shutdown_event set on Ctrl+C for smooth exit."""
     num_workers = workers
@@ -124,9 +127,10 @@ async def async_run_load(
 
     Worker = _worker_for_database(database)
     worker_ctx = Worker()
-    await worker_ctx.setup_async(num_workers, target_rps, init_schema=True)
+    await worker_ctx.setup_async(num_workers, target_rps, init_schema=True, pgbouncer_enabled=pgbouncer_enabled)
     worker_inst = worker_ctx.make_worker_async(
-        insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, queries_per_record
+        insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, queries_per_record,
+        pgbouncer_enabled=pgbouncer_enabled,
     )
     run_query_workers = queries_per_record > 0
 

@@ -30,13 +30,17 @@ func (b *Backend) ReleaseConn(c interface{}) {
 	}
 }
 
-// InsertBatch inserts rows using the given connection (must be driver.Conn).
-func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, error) {
+// InsertBatch inserts rows using the given connection (must be driver.Conn). Returns (rowsInserted, statementCount, error).
+func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, int, error) {
 	c, ok := conn.(driver.Conn)
 	if !ok {
-		return 0, nil
+		return 0, 0, nil
 	}
-	return InsertBatch(context.Background(), c, rows)
+	n, err := InsertBatch(context.Background(), c, rows)
+	if err != nil {
+		return n, 0, err
+	}
+	return n, 1, nil
 }
 
 // Context holds the connection pool for setup/teardown and query workers.

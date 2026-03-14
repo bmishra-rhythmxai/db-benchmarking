@@ -74,7 +74,8 @@ class BaseAsyncInsertWorker(ABC):
         ...
 
     @abstractmethod
-    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
+    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int]:
+        """Insert batch. Returns (rows_inserted, statement_count)."""
         ...
 
     async def _flush(self, batch: Batch) -> None:
@@ -91,17 +92,17 @@ class BaseAsyncInsertWorker(ABC):
             if originals:
                 rows_db = [(r[0], r[1], r[2]) for r in originals]
                 t0 = time.perf_counter()
-                n = await self.insert_batch(conn, rows_db)
+                n, stmts = await self.insert_batch(conn, rows_db)
                 total_rows += n
                 total_latency_sec += time.perf_counter() - t0
-                n_statements += 1
+                n_statements += stmts
             if duplicates:
                 rows_db = [(r[0], r[1], r[2]) for r in duplicates]
                 t0 = time.perf_counter()
-                n = await self.insert_batch(conn, rows_db)
+                n, stmts = await self.insert_batch(conn, rows_db)
                 total_rows += n
                 total_latency_sec += time.perf_counter() - t0
-                n_statements += 1
+                n_statements += stmts
             n_originals = len(originals)
             n_duplicates = len(duplicates)
             async with self.inserted_lock:

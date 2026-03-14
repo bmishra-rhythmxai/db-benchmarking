@@ -49,6 +49,7 @@ async def main_async() -> None:
         description="HL7 messages load driver — async, single process, configurable producers",
     )
     p.add_argument("--database", choices=["postgres", "clickhouse"], required=True)
+    p.add_argument("--pgbouncer-enabled", action="store_true", help="Use PgBouncer with postgres1/postgres2 aliases and pipeline mode for inserts (postgres only)")
     p.add_argument("--duration", type=float, default=60.0, help="Run duration in seconds (total records = duration * rows-per-second)")
     p.add_argument("--batch-size", type=int, default=100, help="Rows per batch; producers emit full batches only")
     p.add_argument("--duplicate-ratio", type=float, default=0.25, help="Ratio of duplicate records (0-1, default 0.25)")
@@ -84,7 +85,8 @@ async def main_async() -> None:
         # add_signal_handler not supported on this platform (e.g. Windows)
         pass
 
-    await ensure_schema_from_db_async(args.database)
+    pgbouncer_enabled = args.pgbouncer_enabled
+    await ensure_schema_from_db_async(args.database, pgbouncer_enabled=pgbouncer_enabled)
     await async_run_load(
         database=args.database,
         duration_sec=args.duration,
@@ -98,6 +100,7 @@ async def main_async() -> None:
         ignore_select_errors=args.ignore_select_errors,
         duplicate_ratio=args.duplicate_ratio,
         shutdown_event=shutdown_event,
+        pgbouncer_enabled=pgbouncer_enabled,
     )
     logger.info("Run finished.")
 

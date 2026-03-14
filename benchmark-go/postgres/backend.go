@@ -13,6 +13,60 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// BuildInsertStatement returns the INSERT upsert SQL and args for the given rows (for use with Exec or Batch.Queue).
+func BuildInsertStatement(rows []benchmarkgo.RowForDB) (sql string, args []interface{}, err error) {
+	if len(rows) == 0 {
+		return "", nil, nil
+	}
+	now := time.Now().UTC()
+	updateCols := make([]string, 0, len(hl7Columns)-1)
+	for _, c := range hl7Columns {
+		if c != "medical_record_number" {
+			updateCols = append(updateCols, c)
+		}
+	}
+	setClause := ""
+	for i, c := range updateCols {
+		if i > 0 {
+			setClause += ", "
+		}
+		setClause += c + " = EXCLUDED." + c
+	}
+	cols := ""
+	for i, c := range hl7Columns {
+		if i > 0 {
+			cols += ", "
+		}
+		cols += c
+	}
+	placeholders := ""
+	args = make([]interface{}, 0, len(rows)*len(hl7Columns))
+	idx := 1
+	for i := range rows {
+		if i > 0 {
+			placeholders += ", "
+		}
+		row, err := rowFromJSON(rows[i].JSONMessage, now)
+		if err != nil {
+			return "", nil, err
+		}
+		ph := "("
+		for j := 0; j < len(hl7Columns); j++ {
+			if j > 0 {
+				ph += ", "
+			}
+			ph += "$" + strconv.Itoa(idx)
+			idx++
+			args = append(args, row[j])
+		}
+		ph += ")"
+		placeholders += ph
+	}
+	sql = "INSERT INTO hl7_messages (" + cols + ") VALUES " + placeholders +
+		" ON CONFLICT (medical_record_number) DO UPDATE SET " + setClause
+	return sql, args, nil
+}
+
 const (
 	hashPartitionModulus = 8
 	// citusShardCount is used for create_distributed_table. Set to the number of Citus workers
@@ -65,9 +119,17 @@ var hl7Columns = []string{
 	"sex_at_birth", "is_pregnant",
 }
 
-// CreatePool creates a pgx connection pool.
+// CreatePool creates a pgx connection pool using the default database (postgres).
 func CreatePool(ctx context.Context, host string, port int, size int) (*pgxpool.Pool, error) {
-	connStr := "postgres://" + benchmarkgo.User + ":" + benchmarkgo.Password + "@" + host + ":" + fmtPort(port) + "/" + benchmarkgo.DBName
+	return CreatePoolWithDB(ctx, host, port, size, benchmarkgo.DBName)
+}
+
+// CreatePoolWithDB creates a pgx connection pool for the given database name (e.g. postgres1, postgres2 for PgBouncer).
+func CreatePoolWithDB(ctx context.Context, host string, port int, size int, database string) (*pgxpool.Pool, error) {
+	if database == "" {
+		database = benchmarkgo.DBName
+	}
+	connStr := "postgres://" + benchmarkgo.User + ":" + benchmarkgo.Password + "@" + host + ":" + fmtPort(port) + "/" + database
 	cfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
@@ -186,53 +248,11 @@ func InsertBatch(ctx context.Context, conn *pgxpool.Conn, rows []benchmarkgo.Row
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	now := time.Now().UTC()
-	updateCols := make([]string, 0, len(hl7Columns)-1)
-	for _, c := range hl7Columns {
-		if c != "medical_record_number" {
-			updateCols = append(updateCols, c)
-		}
+	sql, args, err := BuildInsertStatement(rows)
+	if err != nil {
+		return 0, err
 	}
-	setClause := ""
-	for i, c := range updateCols {
-		if i > 0 {
-			setClause += ", "
-		}
-		setClause += c + " = EXCLUDED." + c
-	}
-	cols := ""
-	for i, c := range hl7Columns {
-		if i > 0 {
-			cols += ", "
-		}
-		cols += c
-	}
-	placeholders := ""
-	args := make([]interface{}, 0, len(rows)*len(hl7Columns))
-	idx := 1
-	for i := range rows {
-		if i > 0 {
-			placeholders += ", "
-		}
-		row, err := rowFromJSON(rows[i].JSONMessage, now)
-		if err != nil {
-			return 0, err
-		}
-		ph := "("
-		for j := 0; j < len(hl7Columns); j++ {
-			if j > 0 {
-				ph += ", "
-			}
-			ph += "$" + strconv.Itoa(idx)
-			idx++
-			args = append(args, row[j])
-		}
-		ph += ")"
-		placeholders += ph
-	}
-	sql := "INSERT INTO hl7_messages (" + cols + ") VALUES " + placeholders +
-		" ON CONFLICT (medical_record_number) DO UPDATE SET " + setClause
-	_, err := conn.Exec(ctx, sql, args...)
+	_, err = conn.Exec(ctx, sql, args...)
 	if err != nil {
 		return 0, err
 	}

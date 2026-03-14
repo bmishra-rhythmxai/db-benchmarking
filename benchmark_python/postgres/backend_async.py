@@ -62,13 +62,13 @@ def _row_from_producer_tuple(t: tuple[str, str, str]) -> tuple:
     )
 
 
-async def create_pool(host: str, port: int, size: int) -> asyncpg.Pool:
+async def create_pool(host: str, port: int, size: int, database: str = DB_NAME) -> asyncpg.Pool:
     pool = await asyncpg.create_pool(
         host=host,
         port=port,
         user=USER,
         password=PASSWORD,
-        database=DB_NAME,
+        database=database,
         min_size=size,
         max_size=size,
         command_timeout=60,
@@ -143,6 +143,7 @@ async def init_schema(conn: asyncpg.Connection) -> None:
 
 
 async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]]) -> int:
+    """Insert rows with a single connection. Returns number of rows inserted."""
     if not rows:
         return 0
     mapped = [_row_from_producer_tuple(r) for r in rows]
@@ -167,6 +168,24 @@ async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]
     return len(rows)
 
 
+# PgBouncer: one pool, flip-flop between postgres1 and postgres2 per batch via SET pgbouncer.database.
+PGBOUNCER_DB1 = "postgres1"
+PGBOUNCER_DB2 = "postgres2"
+
+
+async def insert_batch_pgbouncer_set(
+    conn: asyncpg.Connection,
+    rows: list[tuple[str, str, str]],
+    database: str,
+) -> tuple[int, int]:
+    """SET pgbouncer.database = database then INSERT full batch. Returns (rows_inserted, 1)."""
+    if not rows:
+        return 0, 0
+    await conn.execute(f"SET pgbouncer.database = '{database}'")
+    n = await insert_batch(conn, rows)
+    return n, 1
+
+
 async def query_by_primary_key(conn: asyncpg.Connection, medical_record_number: str) -> list:
     rows = await conn.fetch(
         "SELECT * FROM hl7_messages WHERE medical_record_number = $1",
@@ -182,13 +201,13 @@ async def get_max_patient_counter(conn: asyncpg.Connection) -> int:
     return int(row[0]) if row and row[0] is not None else -1
 
 
-async def init_schema_standalone(host: str, port: int) -> None:
+async def init_schema_standalone(host: str, port: int, database: str = DB_NAME) -> None:
     conn = await asyncpg.connect(
         host=host,
         port=port,
         user=USER,
         password=PASSWORD,
-        database=DB_NAME,
+        database=database,
     )
     try:
         await init_schema(conn)
@@ -196,14 +215,14 @@ async def init_schema_standalone(host: str, port: int) -> None:
         await conn.close()
 
 
-async def get_max_patient_counter_standalone(host: str, port: int) -> int:
+async def get_max_patient_counter_standalone(host: str, port: int, database: str = DB_NAME) -> int:
     try:
         conn = await asyncpg.connect(
             host=host,
             port=port,
             user=USER,
             password=PASSWORD,
-            database=DB_NAME,
+            database=database,
         )
         try:
             return await get_max_patient_counter(conn)

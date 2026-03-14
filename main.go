@@ -32,6 +32,7 @@ func main() {
 	log.SetOutput(&millisWriter{w: os.Stdout})
 
 	database := flag.String("database", "", "postgres or clickhouse (required)")
+	pgbouncerEnabled := flag.Bool("pgbouncer-enabled", false, "Use PgBouncer with postgres1/postgres2 aliases and pipeline mode for inserts (postgres only)")
 	duration := flag.Float64("duration", 60, "Run duration in seconds")
 	batchSize := flag.Int("batch-size", 100, "Rows per batch (producers enqueue full batches)")
 	workers := flag.Int("workers", 5, "Number of worker goroutines")
@@ -58,7 +59,7 @@ func main() {
 
 	var workerCtx benchmarkgo.WorkerCtx
 	if *database == "postgres" {
-		workerCtx = &postgres.Context{}
+		workerCtx = &postgres.Context{PgbouncerEnabled: *pgbouncerEnabled}
 	} else {
 		workerCtx = &clickhouse.Context{}
 	}
@@ -74,6 +75,7 @@ func main() {
 		ProducerThreads:    *producers,
 		IgnoreSelectErrors: *ignoreSelectErrors,
 		DuplicateRatio:     *duplicateRatio,
+		PgbouncerEnabled:   *pgbouncerEnabled,
 	}
 	r := benchmarkgo.NewLoadRunner(cfg, workerCtx)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

@@ -27,6 +27,7 @@ type Config struct {
 	ProducerThreads    int
 	IgnoreSelectErrors bool
 	DuplicateRatio     float64
+	PgbouncerEnabled   bool
 }
 
 // WorkerCtx is the interface for postgres/clickhouse (Setup, Teardown, GetMaxPatientCounter, RunQueryWorker).

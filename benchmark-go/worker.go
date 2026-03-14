@@ -18,7 +18,8 @@ type RowForDB struct {
 type InsertBackend interface {
 	GetConn() interface{}
 	ReleaseConn(interface{})
-	InsertBatch(conn interface{}, rows []RowForDB) (int, error)
+	// InsertBatch returns (rowsInserted, statementCount, error). statementCount is 1 for single-statement inserts, 2 for pipeline (postgres1+postgres2).
+	InsertBatch(conn interface{}, rows []RowForDB) (int, int, error)
 }
 
 // InsertWorker holds state for one insert worker goroutine. Index identifies this worker (0-based).
@@ -70,40 +71,46 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 	conn := w.Backend.GetConn()
 	defer w.Backend.ReleaseConn(conn)
 
-	var totalRows, totalOriginals, totalDuplicates int
+	var totalRows, totalOriginals, totalDuplicates, totalStatements int
 	var totalLatencySec float64
 
 	if len(pair.Originals) > 0 {
-		n, nOrig, nDup, lat := w.insertBatch(conn, pair.Originals)
+		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Originals)
 		totalRows += n
 		totalOriginals += nOrig
 		totalDuplicates += nDup
+		totalStatements += stmts
 		totalLatencySec += lat
 	}
 	if len(pair.Duplicates) > 0 {
-		n, nOrig, nDup, lat := w.insertBatch(conn, pair.Duplicates)
+		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Duplicates)
 		totalRows += n
 		totalOriginals += nOrig
 		totalDuplicates += nDup
+		totalStatements += stmts
 		totalLatencySec += lat
 	}
 
 	latencyMicros := int64(totalLatencySec * 1e6)
-	AddInsert(int64(totalRows), int64(totalOriginals), int64(totalDuplicates), latencyMicros, 1)
+	stmts64 := int64(totalStatements)
+	if stmts64 < 1 {
+		stmts64 = 1
+	}
+	AddInsert(int64(totalRows), int64(totalOriginals), int64(totalDuplicates), latencyMicros, stmts64)
 }
 
-func (w *InsertWorker) insertBatch(conn interface{}, batch []*Record) (n int, nOriginals int, nDuplicates int, latencySec float64) {
+func (w *InsertWorker) insertBatch(conn interface{}, batch []*Record) (n int, nOriginals int, nDuplicates int, statements int, latencySec float64) {
 	rows := make([]RowForDB, len(batch))
 	for i, r := range batch {
 		rows[i] = RowForDB{r.PatientID, r.MessageType, r.JSONMessage}
 	}
 	t0 := time.Now()
 	var err error
-	n, err = w.Backend.InsertBatch(conn, rows)
+	n, statements, err = w.Backend.InsertBatch(conn, rows)
 	latencySec = time.Since(t0).Seconds()
 	if err != nil {
 		log.Printf("InsertBatch error: %v", err)
-		return n, 0, 0, latencySec
+		return n, 0, 0, statements, latencySec
 	}
 	for _, r := range batch {
 		if r.IsOriginal {
@@ -117,7 +124,7 @@ func (w *InsertWorker) insertBatch(conn interface{}, batch []*Record) (n int, nO
 			w.QueryQueue <- &QueryJob{MRN: mrn, InsertTime: insertTime}
 		}
 	}
-	return n, nOriginals, nDuplicates, latencySec
+	return n, nOriginals, nDuplicates, statements, latencySec
 }
 
 func mrnsFromBatch(batch []*Record) []string {

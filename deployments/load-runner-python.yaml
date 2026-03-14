@@ -7,23 +7,23 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: load-runner
+  name: load-runner-python
   namespace: clickhouse
   labels:
-    app: load-runner
+    app: load-runner-python
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: load-runner
+      app: load-runner-python
   template:
     metadata:
       labels:
-        app: load-runner
+        app: load-runner-python
     spec:
       containers:
-      - name: load-runner
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking:v0.0.40
+      - name: load-runner-python
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-python:v0.0.40
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:
@@ -35,6 +35,6 @@ spec:
             memory: 8Gi
         env:
         - name: CLICKHOUSE_HOST
-          value: clickhouse-clickhouse
+          value: chi-clickhouse-dev-cluster-replica0
         - name: POSTGRES_HOST
           value: postgres
