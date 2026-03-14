@@ -6,8 +6,8 @@ import (
 	"math/rand"
 	"sync/atomic"
 
-	"github.com/db-benchmarking/internal/model"
-	"github.com/db-benchmarking/internal/patientgen"
+	"github.com/db-benchmarking/benchmark-go/model"
+	"github.com/db-benchmarking/benchmark-go/patientgen"
 )
 
 const patientMessageType = "PATIENT"

@@ -6,9 +6,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/db-benchmarking/internal/model"
-	"github.com/db-benchmarking/internal/progress"
-	"github.com/db-benchmarking/internal/worker"
+	"github.com/db-benchmarking/benchmark-go/model"
+	"github.com/db-benchmarking/benchmark-go/progress"
+	"github.com/db-benchmarking/benchmark-go/worker"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 

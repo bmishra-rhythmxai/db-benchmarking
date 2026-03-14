@@ -12,8 +12,8 @@ Benchmark comparison for the `hl7_messages` table: `patient_id` (string), `messa
 ## Project layout
 
 - `main.py` – entry point (argparse + run)
-- `benchmark/` – config, Postgres/ClickHouse backends, runner
-- `benchmark/patient_generator.py` – dynamic patient and message payload generation
+- `benchmark_python/` – config, Postgres/ClickHouse backends, runner
+- `benchmark_python/patient_generator.py` – dynamic patient and message payload generation
 
 ## Quick start
 

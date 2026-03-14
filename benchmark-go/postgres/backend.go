@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/db-benchmarking/internal/config"
-	"github.com/db-benchmarking/internal/worker"
+	"github.com/db-benchmarking/benchmark-go/config"
+	"github.com/db-benchmarking/benchmark-go/worker"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )

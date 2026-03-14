@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/db-benchmarking/internal/model"
-	"github.com/db-benchmarking/internal/progress"
-	"github.com/db-benchmarking/internal/worker"
+	"github.com/db-benchmarking/benchmark-go/model"
+	"github.com/db-benchmarking/benchmark-go/progress"
+	"github.com/db-benchmarking/benchmark-go/worker"
 )
 
 const defaultHost = "clickhouse"

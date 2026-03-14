@@ -9,9 +9,9 @@ import (
 	"os"
 	"time"
 
-	"github.com/db-benchmarking/internal/clickhouse"
-	"github.com/db-benchmarking/internal/postgres"
-	"github.com/db-benchmarking/internal/runner"
+	"github.com/db-benchmarking/benchmark-go/clickhouse"
+	"github.com/db-benchmarking/benchmark-go/postgres"
+	"github.com/db-benchmarking/benchmark-go/runner"
 )
 
 // millisWriter prefixes each log line with timestamp in milliseconds (2006/01/02 15:04:05.000).

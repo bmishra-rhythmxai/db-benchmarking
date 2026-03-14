@@ -7,10 +7,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/db-benchmarking/internal/model"
-	"github.com/db-benchmarking/internal/producer"
-	"github.com/db-benchmarking/internal/progress"
-	"github.com/db-benchmarking/internal/worker"
+	"github.com/db-benchmarking/benchmark-go/model"
+	"github.com/db-benchmarking/benchmark-go/producer"
+	"github.com/db-benchmarking/benchmark-go/progress"
+	"github.com/db-benchmarking/benchmark-go/worker"
 	"golang.org/x/time/rate"
 )
 

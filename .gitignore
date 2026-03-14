@@ -3,3 +3,5 @@ __pycache__
 *.pyc
 loadrunner
 main
+traces/*.trace
+~*.xlsx

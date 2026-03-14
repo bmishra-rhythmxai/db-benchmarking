@@ -9,8 +9,8 @@ import (
 
 	"github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
-	"github.com/db-benchmarking/internal/config"
-	"github.com/db-benchmarking/internal/worker"
+	"github.com/db-benchmarking/benchmark-go/config"
+	"github.com/db-benchmarking/benchmark-go/worker"
 )
 
 // CreatePool creates a channel of ClickHouse connections (each is a separate conn).
