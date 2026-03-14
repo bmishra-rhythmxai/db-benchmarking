@@ -1,11 +1,9 @@
-"""Base insert worker: sync and async; consume full batches, insert originals then duplicates."""
+"""Base insert worker: async; consume full batches, insert originals then duplicates."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import queue
-import threading
 import time
 from abc import ABC, abstractmethod
 from typing import Any, TypeVar
@@ -46,99 +44,6 @@ def _split_originals_duplicates(batch: Batch) -> tuple[Batch, Batch]:
         else:
             duplicates.append(r)
     return originals, duplicates
-
-
-class BaseInsertWorker(ABC):
-    """Base class for database insert workers. Consumes full batches from queue; inserts originals then duplicates (no re-queue)."""
-
-    def __init__(
-        self,
-        insertion_queue: queue.Queue[Batch | None],
-        query_queue: queue.Queue[str | Any],
-        inserted_lock: threading.Lock,
-        inserted_shared: list[float],
-        batch_size: int,
-        queries_per_record: int = 1,
-    ) -> None:
-        self.insertion_queue = insertion_queue
-        self.query_queue = query_queue
-        self.inserted_lock = inserted_lock
-        self.inserted_shared = inserted_shared
-        self.batch_size = batch_size
-        self.queries_per_record = queries_per_record
-
-    @abstractmethod
-    def get_connection(self) -> Any:
-        """Acquire a connection/client for this thread. Must be paired with release_connection."""
-        ...
-
-    @abstractmethod
-    def release_connection(self, conn: Any) -> None:
-        """Return the connection/client to the pool."""
-        ...
-
-    @abstractmethod
-    def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> int:
-        """Insert the batch using the given connection. Return number of rows inserted."""
-        ...
-
-    def _flush(self, batch: Batch) -> None:
-        """Insert originals first, then duplicates (match Go). Update stats, push MRNs to query_queue. No re-queue."""
-        if not batch:
-            return
-        originals, duplicates = _split_originals_duplicates(batch)
-        with self.inserted_lock:
-            self.inserted_shared[5] += 1  # in process
-        conn = self.get_connection()
-        try:
-            total_rows = 0
-            total_latency_sec = 0.0
-            n_statements = 0
-            if originals:
-                rows_db: list[tuple[str, str, str]] = [(r[0], r[1], r[2]) for r in originals]
-                t0 = time.perf_counter()
-                n = self.insert_batch(conn, rows_db)
-                total_rows += n
-                total_latency_sec += time.perf_counter() - t0
-                n_statements += 1
-            if duplicates:
-                rows_db = [(r[0], r[1], r[2]) for r in duplicates]
-                t0 = time.perf_counter()
-                n = self.insert_batch(conn, rows_db)
-                total_rows += n
-                total_latency_sec += time.perf_counter() - t0
-                n_statements += 1
-            n_originals = len(originals)
-            n_duplicates = len(duplicates)
-            with self.inserted_lock:
-                self.inserted_shared[0] += total_rows
-                self.inserted_shared[1] += n_originals
-                self.inserted_shared[2] += n_duplicates
-                self.inserted_shared[3] += total_latency_sec
-                self.inserted_shared[4] += n_statements
-            if self.queries_per_record > 0:
-                insert_time = time.time()
-                for mrn in _mrns_from_batch(batch):
-                    self.query_queue.put((mrn, insert_time))
-        finally:
-            with self.inserted_lock:
-                self.inserted_shared[5] -= 1
-                if self.inserted_shared[5] < 0:
-                    self.inserted_shared[5] = 0
-            self.release_connection(conn)
-
-    def run(self) -> None:
-        """Run the worker loop: get full batches, insert originals then duplicates, push MRNs. Stops on INSERTION_SENTINEL."""
-        while True:
-            item = self.insertion_queue.get()
-            if item is INSERTION_SENTINEL:
-                self.insertion_queue.task_done()
-                return
-            self._flush(item)
-            self.insertion_queue.task_done()
-
-
-# --- Async base worker (asyncio.Queue, async insert) ---
 
 
 class BaseAsyncInsertWorker(ABC):
@@ -221,4 +126,6 @@ class BaseAsyncInsertWorker(ABC):
             item = await self.insertion_queue.get()
             if item is INSERTION_SENTINEL:
                 return
+            async with self.inserted_lock:
+                self.inserted_shared[6] += 1
             await self._flush(item)

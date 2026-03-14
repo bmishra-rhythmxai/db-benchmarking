@@ -3,15 +3,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"io"
 	"log"
 	"os"
+	"os/signal"
 	"time"
 
+	"github.com/db-benchmarking/benchmark-go"
 	"github.com/db-benchmarking/benchmark-go/clickhouse"
 	"github.com/db-benchmarking/benchmark-go/postgres"
-	"github.com/db-benchmarking/benchmark-go/runner"
 )
 
 // millisWriter prefixes each log line with timestamp in milliseconds (2006/01/02 15:04:05.000).
@@ -54,14 +56,14 @@ func main() {
 
 	queryDelaySec := *queryDelay / 1000
 
-	var workerCtx runner.WorkerCtx
+	var workerCtx benchmarkgo.WorkerCtx
 	if *database == "postgres" {
 		workerCtx = &postgres.Context{}
 	} else {
 		workerCtx = &clickhouse.Context{}
 	}
 
-	cfg := runner.Config{
+	cfg := benchmarkgo.Config{
 		Database:           *database,
 		DurationSec:        *duration,
 		BatchSize:          *batchSize,
@@ -73,6 +75,8 @@ func main() {
 		IgnoreSelectErrors: *ignoreSelectErrors,
 		DuplicateRatio:     *duplicateRatio,
 	}
-	r := runner.NewLoadRunner(cfg, workerCtx)
-	r.Run()
+	r := benchmarkgo.NewLoadRunner(cfg, workerCtx)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	r.Run(ctx)
 }

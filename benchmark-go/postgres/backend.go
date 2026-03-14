@@ -8,8 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/db-benchmarking/benchmark-go/config"
-	"github.com/db-benchmarking/benchmark-go/worker"
+	"github.com/db-benchmarking/benchmark-go"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -68,7 +67,7 @@ var hl7Columns = []string{
 
 // CreatePool creates a pgx connection pool.
 func CreatePool(ctx context.Context, host string, port int, size int) (*pgxpool.Pool, error) {
-	connStr := "postgres://" + config.User + ":" + config.Password + "@" + host + ":" + fmtPort(port) + "/" + config.DBName
+	connStr := "postgres://" + benchmarkgo.User + ":" + benchmarkgo.Password + "@" + host + ":" + fmtPort(port) + "/" + benchmarkgo.DBName
 	cfg, err := pgxpool.ParseConfig(connStr)
 	if err != nil {
 		return nil, err
@@ -183,7 +182,7 @@ func rowFromJSON(jsonStr string, now time.Time) ([]interface{}, error) {
 }
 
 // InsertBatch upserts rows into hl7_messages (ON CONFLICT DO UPDATE).
-func InsertBatch(ctx context.Context, conn *pgxpool.Conn, rows []worker.RowForDB) (int, error) {
+func InsertBatch(ctx context.Context, conn *pgxpool.Conn, rows []benchmarkgo.RowForDB) (int, error) {
 	if len(rows) == 0 {
 		return 0, nil
 	}

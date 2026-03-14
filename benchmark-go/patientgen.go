@@ -1,4 +1,4 @@
-package patientgen
+package benchmarkgo
 
 import (
 	"encoding/json"

@@ -2,7 +2,7 @@
 
 import os
 
-DB_NAME = "default"
+DB_NAME = "postgres"
 USER = "default"
 PASSWORD = "strongpassword"
 

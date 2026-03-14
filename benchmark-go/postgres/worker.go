@@ -6,16 +6,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/db-benchmarking/benchmark-go/model"
-	"github.com/db-benchmarking/benchmark-go/progress"
-	"github.com/db-benchmarking/benchmark-go/worker"
+	"github.com/db-benchmarking/benchmark-go"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const defaultHost = "localhost"
 const defaultPort = 5432
 
-// Backend holds the pool and implements worker.InsertBackend.
+// Backend holds the pool and implements benchmarkgo.InsertBackend.
 type Backend struct {
 	pool *pgxpool.Pool
 }
@@ -38,7 +36,7 @@ func (b *Backend) ReleaseConn(c interface{}) {
 }
 
 // InsertBatch inserts rows using the given connection (must be *pgxpool.Conn).
-func (b *Backend) InsertBatch(conn interface{}, rows []worker.RowForDB) (int, error) {
+func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, error) {
 	c, ok := conn.(*pgxpool.Conn)
 	if !ok {
 		return 0, nil
@@ -53,7 +51,7 @@ type Context struct {
 }
 
 // Setup creates insert pool and optionally a separate select pool (only when queriesPerRecord > 0). Prewarms and inits schema.
-func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (worker.InsertBackend, error) {
+func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchmarkgo.InsertBackend, error) {
 	if c.insertPool != nil {
 		log.Fatal("postgres Setup already called")
 	}
@@ -127,11 +125,11 @@ func (c *Context) GetMaxPatientCounter() (int, error) {
 	return GetMaxPatientCounter(context.Background(), conn)
 }
 
-// RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, reports via progress.AddQuery.
+// RunQueryWorker consumes from queryQueue, runs queries_per_record lookups per MRN, reports via benchmarkgo.AddQuery.
 // workerIndex is the 0-based index of this query worker.
 func (c *Context) RunQueryWorker(
 	workerIndex int,
-	queryQueue <-chan *model.QueryJob,
+	queryQueue <-chan *benchmarkgo.QueryJob,
 	queriesPerRecord int,
 	queryDelaySec float64,
 	ignoreSelectErrors bool,
@@ -164,6 +162,6 @@ func (c *Context) RunQueryWorker(
 		}
 		latencyMicros := time.Since(t0).Microseconds()
 		conn.Release()
-		progress.AddQuery(int64(queriesPerRecord), latencyMicros, int64(failed))
+		benchmarkgo.AddQuery(int64(queriesPerRecord), latencyMicros, int64(failed))
 	}
 }

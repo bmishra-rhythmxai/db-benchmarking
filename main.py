@@ -8,6 +8,7 @@ Uses asyncio for producers, insert workers, and query workers; no multiprocessin
 import argparse
 import asyncio
 import logging
+import signal
 from datetime import datetime
 
 from benchmark_python.runner import (
@@ -75,6 +76,14 @@ async def main_async() -> None:
         total_records, args.producers, args.workers,
     )
 
+    shutdown_event = asyncio.Event()
+    try:
+        loop = asyncio.get_running_loop()
+        loop.add_signal_handler(signal.SIGINT, shutdown_event.set)
+    except (NotImplementedError, OSError):
+        # add_signal_handler not supported on this platform (e.g. Windows)
+        pass
+
     await ensure_schema_from_db_async(args.database)
     await async_run_load(
         database=args.database,
@@ -88,6 +97,7 @@ async def main_async() -> None:
         total_records=None,  # duration-based: run for duration_sec
         ignore_select_errors=args.ignore_select_errors,
         duplicate_ratio=args.duplicate_ratio,
+        shutdown_event=shutdown_event,
     )
     logger.info("Run finished.")
 

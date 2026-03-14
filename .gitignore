@@ -1,7 +1,6 @@
 .venv
 __pycache__
 *.pyc
-loadrunner
-main
+/db-benchmarking
 traces/*.trace
 ~*.xlsx

@@ -1,13 +1,10 @@
-package worker
+package benchmarkgo
 
 import (
 	"encoding/json"
 	"log"
 	"sync"
 	"time"
-
-	"github.com/db-benchmarking/benchmark-go/model"
-	"github.com/db-benchmarking/benchmark-go/progress"
 )
 
 // RowForDB is (patient_id, message_type, json_message) for insert.
@@ -28,8 +25,8 @@ type InsertBackend interface {
 type InsertWorker struct {
 	Index            int
 	Backend          InsertBackend
-	WorkerQueue      <-chan *model.InsertPair
-	QueryQueue       chan *model.QueryJob
+	WorkerQueue      <-chan *InsertPair
+	QueryQueue       chan *QueryJob
 	QueriesPerRecord int
 	ExitWg           *sync.WaitGroup
 }
@@ -38,8 +35,8 @@ type InsertWorker struct {
 func NewInsertWorker(
 	index int,
 	backend InsertBackend,
-	workerQueue <-chan *model.InsertPair,
-	queryQueue chan *model.QueryJob,
+	workerQueue <-chan *InsertPair,
+	queryQueue chan *QueryJob,
 	queriesPerRecord int,
 	exitWg *sync.WaitGroup,
 ) *InsertWorker {
@@ -63,7 +60,7 @@ func (w *InsertWorker) Run() {
 	}
 }
 
-func (w *InsertWorker) flushPair(pair *model.InsertPair) {
+func (w *InsertWorker) flushPair(pair *InsertPair) {
 	if pair == nil {
 		return
 	}
@@ -92,10 +89,10 @@ func (w *InsertWorker) flushPair(pair *model.InsertPair) {
 	}
 
 	latencyMicros := int64(totalLatencySec * 1e6)
-	progress.AddInsert(int64(totalRows), int64(totalOriginals), int64(totalDuplicates), latencyMicros, 1)
+	AddInsert(int64(totalRows), int64(totalOriginals), int64(totalDuplicates), latencyMicros, 1)
 }
 
-func (w *InsertWorker) insertBatch(conn interface{}, batch []*model.Record) (n int, nOriginals int, nDuplicates int, latencySec float64) {
+func (w *InsertWorker) insertBatch(conn interface{}, batch []*Record) (n int, nOriginals int, nDuplicates int, latencySec float64) {
 	rows := make([]RowForDB, len(batch))
 	for i, r := range batch {
 		rows[i] = RowForDB{r.PatientID, r.MessageType, r.JSONMessage}
@@ -117,13 +114,13 @@ func (w *InsertWorker) insertBatch(conn interface{}, batch []*model.Record) (n i
 	if w.QueriesPerRecord > 0 {
 		insertTime := time.Now()
 		for _, mrn := range mrnsFromBatch(batch) {
-			w.QueryQueue <- &model.QueryJob{MRN: mrn, InsertTime: insertTime}
+			w.QueryQueue <- &QueryJob{MRN: mrn, InsertTime: insertTime}
 		}
 	}
 	return n, nOriginals, nDuplicates, latencySec
 }
 
-func mrnsFromBatch(batch []*model.Record) []string {
+func mrnsFromBatch(batch []*Record) []string {
 	var mrns []string
 	for _, rec := range batch {
 		if rec == nil {

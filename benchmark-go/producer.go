@@ -1,13 +1,10 @@
-package producer
+package benchmarkgo
 
 import (
 	"context"
 	"encoding/json"
 	"math/rand"
 	"sync/atomic"
-
-	"github.com/db-benchmarking/benchmark-go/model"
-	"github.com/db-benchmarking/benchmark-go/patientgen"
 )
 
 const patientMessageType = "PATIENT"
@@ -20,8 +17,8 @@ type Producer struct {
 	PatientStartBase int
 	NextID           *atomic.Int64
 	DuplicateRatio   float64
-	InitialPair      *model.InsertPair
-	ProducerQueue    chan<- *model.InsertPair
+	InitialPair      *InsertPair
+	ProducerQueue    chan<- *InsertPair
 	RecvCh           <-chan struct{}
 	SendCh           chan<- struct{}
 }
@@ -33,8 +30,8 @@ func NewProducer(
 	patientStartBase int,
 	nextID *atomic.Int64,
 	duplicateRatio float64,
-	initialPair *model.InsertPair,
-	producerQueue chan<- *model.InsertPair,
+	initialPair *InsertPair,
+	producerQueue chan<- *InsertPair,
 	recvCh <-chan struct{},
 	sendCh chan<- struct{},
 ) *Producer {
@@ -52,12 +49,12 @@ func NewProducer(
 }
 
 // BuildInitialPair builds one InsertPair for a producer. Call once per producer in order before starting goroutines so batch building order is deterministic.
-func BuildInitialPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *model.InsertPair {
+func BuildInitialPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *InsertPair {
 	return buildInsertPair(batchSize, patientStartBase, nextID, duplicateRatio)
 }
 
-func buildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *model.InsertPair {
-	batch := make([]*model.Record, 0, batchSize)
+func buildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, duplicateRatio float64) *InsertPair {
+	batch := make([]*Record, 0, batchSize)
 	for len(batch) < batchSize {
 		var ordinal int
 		var isOriginal bool
@@ -74,23 +71,23 @@ func buildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, 
 			ordinal = int(nextID.Add(1) - 1)
 			isOriginal = true
 		}
-		p := patientgen.GenerateOnePatient(ordinal, isOriginal)
+		p := GenerateOnePatient(ordinal, isOriginal)
 		jsonMsg, _ := p.ToJSON()
-		batch = append(batch, &model.Record{
+		batch = append(batch, &Record{
 			PatientID:   p.PatientID,
 			MessageType: patientMessageType,
 			JSONMessage: jsonMsg,
 			IsOriginal:  p.IsOriginal,
 		})
 	}
-	var originals []*model.Record
+	var originals []*Record
 	for _, r := range batch {
 		if r != nil && r.IsOriginal {
 			originals = append(originals, r)
 		}
 	}
 	seen := make(map[string]struct{})
-	var duplicates []*model.Record
+	var duplicates []*Record
 	for _, r := range batch {
 		if r == nil || r.IsOriginal {
 			continue
@@ -102,7 +99,7 @@ func buildInsertPair(batchSize int, patientStartBase int, nextID *atomic.Int64, 
 		seen[key] = struct{}{}
 		duplicates = append(duplicates, r)
 	}
-	return &model.InsertPair{Originals: originals, Duplicates: duplicates}
+	return &InsertPair{Originals: originals, Duplicates: duplicates}
 }
 
 // Run produces batches and enqueues them until ctx is cancelled.
@@ -135,5 +132,5 @@ func (p *Producer) Run(ctx context.Context) {
 }
 
 func init() {
-	_, _ = json.Marshal(patientgen.PatientRecord{})
+	_, _ = json.Marshal(PatientRecord{})
 }

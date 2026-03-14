@@ -1,4 +1,4 @@
-package progress
+package benchmarkgo
 
 import (
 	"fmt"
@@ -11,15 +11,15 @@ const defaultInterval = 5 * time.Second
 
 // Atomic counters (int64). Latencies stored in microseconds for atomic Add.
 var (
-	insertTotal             atomic.Int64
-	insertOriginals         atomic.Int64
-	insertDuplicates        atomic.Int64
-	insertLatencyMicros     atomic.Int64
-	insertStatements        atomic.Int64
-	insertStarted           atomic.Int64
-	queryCount              atomic.Int64
-	queryLatencyMicros      atomic.Int64
-	queryFailed             atomic.Int64
+	insertTotal         atomic.Int64
+	insertOriginals     atomic.Int64
+	insertDuplicates    atomic.Int64
+	insertLatencyMicros atomic.Int64
+	insertStatements    atomic.Int64
+	insertStarted       atomic.Int64
+	queryCount          atomic.Int64
+	queryLatencyMicros  atomic.Int64
+	queryFailed         atomic.Int64
 )
 
 func init() {
@@ -102,7 +102,7 @@ func loadSnapshot() Snapshot {
 		Inserted: InsertedStats{
 			Total:                 float64(insertTotal.Load()),
 			Originals:             float64(insertOriginals.Load()),
-			Duplicates:            float64(insertDuplicates.Load()),
+			Duplicates:             float64(insertDuplicates.Load()),
 			TotalInsertLatencySec: float64(insLat) / 1e6,
 			InsertStatements:      float64(insertStatements.Load()),
 		},
@@ -116,12 +116,12 @@ func loadSnapshot() Snapshot {
 
 // Reporter holds state for the progress reporting goroutine and logs insert/query progress every interval.
 type Reporter struct {
-	Interval       time.Duration
-	prevInserted   InsertedStats
+	Interval          time.Duration
+	prevInserted      InsertedStats
 	prevInsertStarted int64
-	prevQueries    float64
-	prevQueryLatency float64
-	prevFailed     float64
+	prevQueries       float64
+	prevQueryLatency  float64
+	prevFailed        float64
 }
 
 // NewReporter creates a Reporter with the given log interval. If interval <= 0, defaultInterval is used.

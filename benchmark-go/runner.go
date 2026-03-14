@@ -1,4 +1,4 @@
-package runner
+package benchmarkgo
 
 import (
 	"context"
@@ -7,10 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/db-benchmarking/benchmark-go/model"
-	"github.com/db-benchmarking/benchmark-go/producer"
-	"github.com/db-benchmarking/benchmark-go/progress"
-	"github.com/db-benchmarking/benchmark-go/worker"
 	"golang.org/x/time/rate"
 )
 
@@ -35,22 +31,22 @@ type Config struct {
 
 // WorkerCtx is the interface for postgres/clickhouse (Setup, Teardown, GetMaxPatientCounter, RunQueryWorker).
 type WorkerCtx interface {
-	Setup(numWorkers, targetRPS int, queriesPerRecord int) (worker.InsertBackend, error)
+	Setup(numWorkers, targetRPS int, queriesPerRecord int) (InsertBackend, error)
 	Teardown()
 	GetMaxPatientCounter() (int, error)
-	RunQueryWorker(workerIndex int, queryQueue <-chan *model.QueryJob, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
+	RunQueryWorker(workerIndex int, queryQueue <-chan *QueryJob, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
 }
 
 // Router distributes from producer queue to worker queues with rate limiting. Maintains next worker index for round-robin.
 type Router struct {
-	ProducerQueue <-chan *model.InsertPair
-	WorkerQueues   []chan *model.InsertPair
+	ProducerQueue <-chan *InsertPair
+	WorkerQueues   []chan *InsertPair
 	RateLimiter    *rate.Limiter
 	nextIndex      int
 }
 
 // NewRouter creates a Router. workerQueues are the per-worker queues to distribute to.
-func NewRouter(producerQueue <-chan *model.InsertPair, workerQueues []chan *model.InsertPair, rateLimiter *rate.Limiter) *Router {
+func NewRouter(producerQueue <-chan *InsertPair, workerQueues []chan *InsertPair, rateLimiter *rate.Limiter) *Router {
 	return &Router{
 		ProducerQueue: producerQueue,
 		WorkerQueues:  workerQueues,
@@ -59,19 +55,36 @@ func NewRouter(producerQueue <-chan *model.InsertPair, workerQueues []chan *mode
 }
 
 // Run drains the producer queue, rate-limits, and sends to worker queues round-robin. Closes all worker queues when done.
-func (r *Router) Run() {
-	for pair := range r.ProducerQueue {
-		totalRows := len(pair.Originals) + len(pair.Duplicates)
-		if totalRows > 0 && r.RateLimiter != nil {
-			_ = r.RateLimiter.WaitN(context.Background(), totalRows)
+// If ctx is cancelled (e.g. Ctrl+C), rate-limited wait is interrupted and the loop exits.
+func (r *Router) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			for i := range r.WorkerQueues {
+				close(r.WorkerQueues[i])
+			}
+			return
+		case pair, ok := <-r.ProducerQueue:
+			if !ok {
+				for i := range r.WorkerQueues {
+					close(r.WorkerQueues[i])
+				}
+				return
+			}
+			totalRows := len(pair.Originals) + len(pair.Duplicates)
+			if totalRows > 0 && r.RateLimiter != nil {
+				if err := r.RateLimiter.WaitN(ctx, totalRows); err != nil {
+					for i := range r.WorkerQueues {
+						close(r.WorkerQueues[i])
+					}
+					return
+				}
+			}
+			idx := r.nextIndex % len(r.WorkerQueues)
+			r.nextIndex = (r.nextIndex + 1) % len(r.WorkerQueues)
+			r.WorkerQueues[idx] <- pair
+			AddInsertStarted(1)
 		}
-		idx := r.nextIndex % len(r.WorkerQueues)
-		r.nextIndex = (r.nextIndex + 1) % len(r.WorkerQueues)
-		r.WorkerQueues[idx] <- pair
-		progress.AddInsertStarted(1)
-	}
-	for i := range r.WorkerQueues {
-		close(r.WorkerQueues[i])
 	}
 }
 
@@ -81,21 +94,21 @@ type LoadRunner struct {
 	WorkerCtx WorkerCtx
 
 	// Runtime state (set by Run)
-	runStart       time.Time
-	producerQueue  chan *model.InsertPair
-	queryQueue     chan *model.QueryJob
-	workerQueues   []chan *model.InsertPair
-	doneCh         chan struct{}
-	resultCh       chan progress.Snapshot
-	runCtx         context.Context
-	cancelRun      context.CancelFunc
-	patientStart   int
-	nextID         atomic.Int64
-	backend        worker.InsertBackend
-	triggers       []chan struct{}
-	producers      []*producer.Producer
-	insertWorkers  []*worker.InsertWorker
-	progressReporter *progress.Reporter
+	runStart         time.Time
+	producerQueue    chan *InsertPair
+	queryQueue       chan *QueryJob
+	workerQueues     []chan *InsertPair
+	doneCh           chan struct{}
+	resultCh         chan Snapshot
+	runCtx           context.Context
+	cancelRun        context.CancelFunc
+	patientStart     int
+	nextID           atomic.Int64
+	backend          InsertBackend
+	triggers         []chan struct{}
+	producers        []*Producer
+	insertWorkers    []*InsertWorker
+	progressReporter *Reporter
 }
 
 // NewLoadRunner builds a LoadRunner from config and worker context. Call Run() to execute the load.
@@ -107,7 +120,8 @@ func NewLoadRunner(cfg Config, ctx WorkerCtx) *LoadRunner {
 }
 
 // Run executes the full load: sets up channels and state, starts router, producers, and workers, then waits and logs summary.
-func (r *LoadRunner) Run() {
+// If ctx is cancelled (e.g. Ctrl+C), producers stop and the run shuts down gracefully.
+func (r *LoadRunner) Run(ctx context.Context) {
 	cfg := &r.Config
 	workers := cfg.Workers
 	producerThreads := cfg.ProducerThreads
@@ -116,16 +130,16 @@ func (r *LoadRunner) Run() {
 	producerQueueCap := max3(256, workers*workerQueueCap*2, producerThreads*32)
 	queryQueueMax := max3(workers*4, cfg.BatchSize*workers*4, cfg.TargetRPS*4)
 
-	r.producerQueue = make(chan *model.InsertPair, producerQueueCap)
-	r.queryQueue = make(chan *model.QueryJob, queryQueueMax)
+	r.producerQueue = make(chan *InsertPair, producerQueueCap)
+	r.queryQueue = make(chan *QueryJob, queryQueueMax)
 	r.doneCh = make(chan struct{})
-	r.resultCh = make(chan progress.Snapshot, 1)
-	r.runCtx, r.cancelRun = context.WithTimeout(context.Background(), time.Duration(cfg.DurationSec*float64(time.Second)))
+	r.resultCh = make(chan Snapshot, 1)
+	r.runCtx, r.cancelRun = context.WithTimeout(ctx, time.Duration(cfg.DurationSec*float64(time.Second)))
 	defer r.cancelRun()
 
-	r.workerQueues = make([]chan *model.InsertPair, workers)
+	r.workerQueues = make([]chan *InsertPair, workers)
 	for i := 0; i < workers; i++ {
-		r.workerQueues[i] = make(chan *model.InsertPair, workerQueueCap)
+		r.workerQueues[i] = make(chan *InsertPair, workerQueueCap)
 	}
 
 	log.Printf("Connecting to %s (workers=%d, producers=%d, batch_size=%d, duration=%.1fs, target_rps=%d, queries_per_record=%d, query_delay=%.0fms, duplicate_ratio=%.2f)",
@@ -145,17 +159,17 @@ func (r *LoadRunner) Run() {
 	r.nextID.Store(int64(r.patientStart))
 	log.Printf("Producers using atomic counter starting at %d (max in DB: %d)", r.patientStart, maxCounter)
 
-	r.progressReporter = progress.NewReporter(progressInterval)
+	r.progressReporter = NewReporter(progressInterval)
 	go r.progressReporter.Run(r.doneCh, r.resultCh)
 
 	router := NewRouter(r.producerQueue, r.workerQueues, rateLimiter)
-	go router.Run()
+	go router.Run(r.runCtx)
 
 	var insertExitWg sync.WaitGroup
 	insertExitWg.Add(workers)
-	r.insertWorkers = make([]*worker.InsertWorker, workers)
+	r.insertWorkers = make([]*InsertWorker, workers)
 	for i := 0; i < workers; i++ {
-		r.insertWorkers[i] = worker.NewInsertWorker(i, r.backend, r.workerQueues[i], r.queryQueue, cfg.QueriesPerRecord, &insertExitWg)
+		r.insertWorkers[i] = NewInsertWorker(i, r.backend, r.workerQueues[i], r.queryQueue, cfg.QueriesPerRecord, &insertExitWg)
 		go r.insertWorkers[i].Run()
 	}
 
@@ -173,9 +187,9 @@ func (r *LoadRunner) Run() {
 	}
 
 	// Pre-build one InsertPair per producer (order deterministic).
-	preBuilt := make([]*model.InsertPair, producerThreads)
+	preBuilt := make([]*InsertPair, producerThreads)
 	for i := 0; i < producerThreads; i++ {
-		preBuilt[i] = producer.BuildInitialPair(cfg.BatchSize, r.patientStart, &r.nextID, cfg.DuplicateRatio)
+		preBuilt[i] = BuildInitialPair(cfg.BatchSize, r.patientStart, &r.nextID, cfg.DuplicateRatio)
 	}
 
 	r.triggers = make([]chan struct{}, producerThreads)
@@ -184,10 +198,10 @@ func (r *LoadRunner) Run() {
 	}
 	r.triggers[0] <- struct{}{}
 
-	r.producers = make([]*producer.Producer, producerThreads)
+	r.producers = make([]*Producer, producerThreads)
 	var producerWg sync.WaitGroup
 	for i := 0; i < producerThreads; i++ {
-		r.producers[i] = producer.NewProducer(
+		r.producers[i] = NewProducer(
 			i,
 			cfg.BatchSize,
 			r.patientStart,
@@ -199,7 +213,7 @@ func (r *LoadRunner) Run() {
 			r.triggers[(i+1)%producerThreads],
 		)
 		producerWg.Add(1)
-		go func(p *producer.Producer) {
+		go func(p *Producer) {
 			defer producerWg.Done()
 			p.Run(r.runCtx)
 		}(r.producers[i])
@@ -221,7 +235,7 @@ func (r *LoadRunner) Run() {
 	r.logSummary(snapshot)
 }
 
-func (r *LoadRunner) logSummary(snapshot progress.Snapshot) {
+func (r *LoadRunner) logSummary(snapshot Snapshot) {
 	cfg := &r.Config
 	runEnd := time.Now()
 	elapsed := runEnd.Sub(r.runStart).Seconds()

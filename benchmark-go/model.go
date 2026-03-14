@@ -1,4 +1,6 @@
-package model
+package benchmarkgo
+
+import "time"
 
 // Record is (patient_id, message_type, json_message, is_original).
 type Record struct {
@@ -12,6 +14,12 @@ type Record struct {
 type InsertPair struct {
 	Originals  []*Record
 	Duplicates []*Record
+}
+
+// QueryJob is sent to query workers; nil pointer means QUERY_SENTINEL (stop).
+type QueryJob struct {
+	MRN        string
+	InsertTime time.Time
 }
 
 // InsertionSentinel: pass nil *Record to signal end of insertion stream.
