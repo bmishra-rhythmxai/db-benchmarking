@@ -62,23 +62,35 @@ def _row_from_producer_tuple(t: tuple[str, str, str]) -> tuple:
     )
 
 
-async def create_pool(host: str, port: int, size: int, database: str = DB_NAME) -> asyncpg.Pool:
-    pool = await asyncpg.create_pool(
-        host=host,
-        port=port,
-        user=USER,
-        password=PASSWORD,
-        database=database,
-        min_size=size,
-        max_size=size,
-        command_timeout=60,
-    )
+async def create_pool(
+    host: str,
+    port: int,
+    size: int,
+    database: str = DB_NAME,
+    *,
+    statement_cache_size: int | None = None,
+) -> asyncpg.Pool:
+    kwargs: dict[str, Any] = {
+        "host": host,
+        "port": port,
+        "user": USER,
+        "password": PASSWORD,
+        "database": database,
+        "min_size": size,
+        "max_size": size,
+        "command_timeout": 60,
+    }
+    if statement_cache_size is not None:
+        kwargs["statement_cache_size"] = statement_cache_size
+    pool = await asyncpg.create_pool(**kwargs)
     return pool
 
 
-async def prewarm_pool(pool: asyncpg.Pool, size: int) -> None:
-    async with pool.acquire() as conn:
-        await conn.execute("SET synchronous_commit = off")
+async def prewarm_pool(pool: asyncpg.Pool, size: int, skip_session_set: bool = False) -> None:
+    """Prewarm pool by acquiring/releasing connections. skip_session_set=True for PgBouncer (avoids SET that can desync asyncpg protocol)."""
+    if not skip_session_set:
+        async with pool.acquire() as conn:
+            await conn.execute("SET synchronous_commit = off")
     conns = []
     for _ in range(size - 1):
         conns.append(await pool.acquire())
@@ -141,17 +153,51 @@ async def init_schema(conn: asyncpg.Connection) -> None:
     logger.info("Table hl7_messages created with hash partitioning (modulus %d)", HASH_PARTITION_MODULUS)
 
 
-async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]]) -> int:
-    """Insert rows with a single connection. Returns number of rows inserted."""
+def _to_pg_literal(val: Any) -> str:
+    """Format a value as a PostgreSQL literal (no prepared statement / inlined in SQL)."""
+    if val is None:
+        return "NULL"
+    if isinstance(val, str):
+        return "'" + val.replace("'", "''") + "'"
+    if isinstance(val, datetime):
+        return "'" + val.isoformat().replace("'", "''") + "'"
+    if isinstance(val, bool):
+        return "TRUE" if val else "FALSE"
+    if isinstance(val, (int, float)):
+        return str(val)
+    return "'" + str(val).replace("'", "''") + "'"
+
+
+def _build_insert_sql_with_literals(rows: list[tuple[str, str, str]]) -> str:
+    """Build INSERT SQL with all values inlined as literals (for one concatenated SET+INSERT string, no params)."""
     if not rows:
-        return 0
+        return ""
+    mapped = [_row_from_producer_tuple(r) for r in rows]
+    cols = ", ".join(_HL7_COLUMNS)
+    update_cols = [c for c in _HL7_COLUMNS if c != "medical_record_number"]
+    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
+    values_list = []
+    for row in mapped:
+        literals = ", ".join(_to_pg_literal(v) for v in row)
+        values_list.append(f"({literals})")
+    values_sql = ", ".join(values_list)
+    return (
+        f"INSERT INTO hl7_messages ({cols}) VALUES {values_sql} "
+        f"ON CONFLICT (medical_record_number) DO UPDATE SET {set_clause}"
+    )
+
+
+def _build_insert_sql_and_args(rows: list[tuple[str, str, str]]) -> tuple[str, list[Any]]:
+    """Build parameterized INSERT SQL and flat args for hl7_messages. Returns (sql, args)."""
+    if not rows:
+        return "", []
     mapped = [_row_from_producer_tuple(r) for r in rows]
     cols = ", ".join(_HL7_COLUMNS)
     n = len(_HL7_COLUMNS)
     update_cols = [c for c in _HL7_COLUMNS if c != "medical_record_number"]
     set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
     args: list[Any] = []
-    for i, row in enumerate(mapped):
+    for row in mapped:
         args.extend(row)
     placeholders_list = []
     for r in range(len(mapped)):
@@ -162,6 +208,14 @@ async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]
         f"INSERT INTO hl7_messages ({cols}) VALUES {values_sql} "
         f"ON CONFLICT (medical_record_number) DO UPDATE SET {set_clause}"
     )
+    return sql, args
+
+
+async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]]) -> int:
+    """Insert rows with a single connection. Returns number of rows inserted."""
+    if not rows:
+        return 0
+    sql, args = _build_insert_sql_and_args(rows)
     await conn.execute(sql, *args)
     return len(rows)
 
@@ -176,12 +230,14 @@ async def insert_batch_pgbouncer_set(
     rows: list[tuple[str, str, str]],
     database: str,
 ) -> tuple[int, int]:
-    """SET pgbouncer.database = database then INSERT full batch. Returns (rows_inserted, 1)."""
+    """Send SET pgbouncer.database and INSERT as one concatenated string (literals inlined; no prepared statement). Returns (rows_inserted, 1)."""
     if not rows:
         return 0, 0
-    await conn.execute(f"SET pgbouncer.database = '{database}'")
-    n = await insert_batch(conn, rows)
-    return n, 1
+    safe_db = database.replace("'", "''")
+    insert_sql = _build_insert_sql_with_literals(rows)
+    combined = f"SET pgbouncer.database = '{safe_db}'; {insert_sql}"
+    await conn.execute(combined)
+    return len(rows), 1
 
 
 async def query_by_primary_key(conn: asyncpg.Connection, medical_record_number: str) -> list:

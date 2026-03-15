@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/db-benchmarking/benchmark-go"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -121,11 +122,12 @@ var hl7Columns = []string{
 
 // CreatePool creates a pgx connection pool using the default database (postgres).
 func CreatePool(ctx context.Context, host string, port int, size int) (*pgxpool.Pool, error) {
-	return CreatePoolWithDB(ctx, host, port, size, benchmarkgo.DBName)
+	return CreatePoolWithDB(ctx, host, port, size, benchmarkgo.DBName, false)
 }
 
 // CreatePoolWithDB creates a pgx connection pool for the given database name (e.g. postgres1, postgres2 for PgBouncer).
-func CreatePoolWithDB(ctx context.Context, host string, port int, size int, database string) (*pgxpool.Pool, error) {
+// When useSimpleProtocol is true, queries use the simple protocol (no prepared statements), allowing multiple statements in one string (e.g. SET + INSERT for PgBouncer).
+func CreatePoolWithDB(ctx context.Context, host string, port int, size int, database string, useSimpleProtocol bool) (*pgxpool.Pool, error) {
 	if database == "" {
 		database = benchmarkgo.DBName
 	}
@@ -136,6 +138,9 @@ func CreatePoolWithDB(ctx context.Context, host string, port int, size int, data
 	}
 	cfg.MaxConns = int32(size)
 	cfg.MinConns = int32(size)
+	if useSimpleProtocol {
+		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
+	}
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 

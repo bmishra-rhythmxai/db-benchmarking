@@ -327,12 +327,14 @@ spec:
 ---
 # PgBouncer: two database aliases (postgres1, postgres2) to the same Postgres for pipeline-mode benchmarks.
 # Connect with POSTGRES_HOST=pgbouncer, POSTGRES_PORT=6432, database=postgres1 or postgres2.
+# Single Secret so one volume mount to /opt/bitnami/pgbouncer/conf avoids subPath mount conflicts.
 apiVersion: v1
-kind: ConfigMap
+kind: Secret
 metadata:
   name: pgbouncer-config
   namespace: clickhouse
-data:
+type: Opaque
+stringData:
   pgbouncer.ini: |
     [databases]
     postgres1 = host=postgres-primary port=5432 dbname=postgres
@@ -342,17 +344,9 @@ data:
     listen_port = 6432
     pool_mode = transaction
     auth_type = scram-sha-256
-    auth_file = /etc/pgbouncer/userlist.txt
+    auth_file = /opt/bitnami/pgbouncer/conf/userlist.txt
     max_client_conn = 1000
     default_pool_size = 25
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: pgbouncer-userlist
-  namespace: clickhouse
-type: Opaque
-stringData:
   userlist.txt: |
     "default" "strongpassword"
 ---
@@ -376,23 +370,15 @@ spec:
       containers:
       - name: pgbouncer
         image: devgwrxacr.azurecr.io/bikash/pgbouncer:v0.0.1
-        args:
-          - /etc/pgbouncer/pgbouncer.ini
+        command: ["pgbouncer", "/opt/bitnami/pgbouncer/conf/pgbouncer.ini"]
         ports:
         - containerPort: 6432
           name: pgbouncer
+        # Mount config read-only; we run pgbouncer directly (no Bitnami entrypoint) so nothing needs to write here.
         volumeMounts:
-        - name: config
-          mountPath: /etc/pgbouncer/pgbouncer.ini
-          subPath: pgbouncer.ini
+        - name: conf
+          mountPath: /opt/bitnami/pgbouncer/conf
           readOnly: true
-        - name: userlist
-          mountPath: /etc/pgbouncer/userlist.txt
-          subPath: userlist.txt
-          readOnly: true
-        env:
-        - name: PGBOUNCER_AUTH_TYPE
-          value: scram-sha-256
         readinessProbe:
           tcpSocket:
             port: 6432
@@ -404,15 +390,10 @@ spec:
           initialDelaySeconds: 10
           periodSeconds: 10
       volumes:
-      - name: config
-        configMap:
-          name: pgbouncer-config
-      - name: userlist
+      - name: conf
         secret:
-          secretName: pgbouncer-userlist
-          items:
-          - key: userlist.txt
-            path: userlist.txt
+          secretName: pgbouncer-config
+          defaultMode: 0644
 ---
 apiVersion: v1
 kind: Service

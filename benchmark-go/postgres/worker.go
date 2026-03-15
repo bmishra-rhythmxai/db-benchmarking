@@ -5,11 +5,11 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/db-benchmarking/benchmark-go"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -49,7 +49,7 @@ func (b *Backend) ReleaseConn(c interface{}) {
 }
 
 // InsertBatch inserts rows using the given connection (must be *pgxpool.Conn). Returns (rowsInserted, statementCount, error).
-// When pgbouncerMode is true, uses pgx Batch to send SET pgbouncer.database + INSERT in one round-trip (pipeline), flip-flopping postgres1/postgres2.
+// When pgbouncerMode is true, sends SET pgbouncer.database and INSERT as one concatenated string (simple protocol, no prepared statement), flip-flopping postgres1/postgres2.
 func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, int, error) {
 	c, ok := conn.(*pgxpool.Conn)
 	if !ok {
@@ -73,15 +73,10 @@ func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (in
 	if err != nil {
 		return 0, 0, err
 	}
-	batch := &pgx.Batch{}
-	batch.Queue("SET pgbouncer.database = $1", db)
-	batch.Queue(insertSQL, insertArgs...)
-	br := c.SendBatch(ctx, batch)
-	defer br.Close()
-	if _, err := br.Exec(); err != nil {
-		return 0, 0, err
-	}
-	if _, err := br.Exec(); err != nil {
+	setSQL := "SET pgbouncer.database = '" + strings.ReplaceAll(db, "'", "''") + "'"
+	combined := setSQL + "; " + insertSQL
+	_, err = c.Exec(ctx, combined, insertArgs...)
+	if err != nil {
 		return 0, 0, err
 	}
 	return len(rows), 1, nil
@@ -128,7 +123,7 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 	if c.PgbouncerEnabled {
 		log.Printf("Creating PostgreSQL connection pool at %s:%d (pgbouncer: postgres1, flip-flop postgres1/postgres2, %d insert)",
 			host, port, numWorkers)
-		insertPool, err := CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1)
+		insertPool, err := CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1, true)
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +132,7 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 			insertPool.Close()
 			return nil, err
 		}
-		c.selectPool, _ = CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1)
+		c.selectPool, _ = CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1, true)
 		if c.selectPool != nil {
 			_ = PrewarmPool(ctx, c.selectPool, numWorkers)
 		}
