@@ -1,4 +1,4 @@
-"""ClickHouse insert worker and query worker (async, sync driver via run_in_executor)."""
+"""ClickHouse insert worker and query worker (async via asynch driver)."""
 from __future__ import annotations
 
 import asyncio
@@ -18,14 +18,13 @@ DEFAULT_PORT = 9000
 
 
 class _ClickHouseResourcesAsync:
-    def __init__(self, client_queue: asyncio.Queue, clients: list, loop: asyncio.AbstractEventLoop) -> None:
+    def __init__(self, client_queue: asyncio.Queue, connections: list) -> None:
         self.client_queue = client_queue
-        self.clients = clients
-        self.loop = loop
+        self.connections = connections
 
 
 class ClickHouseWorker:
-    """ClickHouse worker context: async setup/teardown and async insert workers (sync driver in executor)."""
+    """ClickHouse worker context: async setup/teardown and async insert workers (asynch driver)."""
 
     def __init__(self) -> None:
         self._resources_async = None
@@ -34,27 +33,22 @@ class ClickHouseWorker:
         if self._resources_async is not None:
             raise RuntimeError("ClickHouseWorker.setup_async() already called")
         host = os.environ.get("CLICKHOUSE_HOST") or DEFAULT_HOST
-        port = DEFAULT_PORT
+        port = int(os.environ.get("CLICKHOUSE_PORT") or DEFAULT_PORT)
         pool_size = num_workers * 2
-        loop = asyncio.get_running_loop()
-        ch_pool_list = await loop.run_in_executor(
-            None,
-            lambda: backend.create_pool(host, port, pool_size),
-        )
-        await loop.run_in_executor(None, lambda: backend.prewarm_pool(ch_pool_list))
+        connections = await backend.create_pool(host, port, pool_size)
+        await backend.prewarm_pool(connections)
         if init_schema:
-            await loop.run_in_executor(None, lambda: backend.init_schema(ch_pool_list[0]))
+            await backend.init_schema(connections[0])
         logger.info("Starting insertions (target %d rows/sec) ...", target_rps)
         client_queue: asyncio.Queue[Any] = asyncio.Queue()
-        for c in ch_pool_list:
+        for c in connections:
             await client_queue.put(c)
-        self._resources_async = _ClickHouseResourcesAsync(client_queue, ch_pool_list, loop)
+        self._resources_async = _ClickHouseResourcesAsync(client_queue, connections)
         return self
 
     async def teardown_async(self) -> None:
         if self._resources_async is not None:
-            for c in self._resources_async.clients:
-                await asyncio.get_running_loop().run_in_executor(None, c.disconnect)
+            await backend.close_pool(self._resources_async.connections)
             self._resources_async = None
 
     def make_worker_async(
@@ -65,12 +59,12 @@ class ClickHouseWorker:
         inserted_shared: list[float],
         batch_size: int,
         queries_per_record: int = 1,
+        pgbouncer_enabled: bool = False,
     ) -> ClickHouseAsyncWorker:
         return ClickHouseAsyncWorker(
             insertion_queue,
             query_queue,
             self._resources_async.client_queue,
-            self._resources_async.loop,
             inserted_lock,
             inserted_shared,
             batch_size,
@@ -78,32 +72,27 @@ class ClickHouseWorker:
         )
 
     async def get_max_patient_counter_async(self) -> int:
-        client = await self._resources_async.client_queue.get()
+        conn = await self._resources_async.client_queue.get()
         try:
-            return await self._resources_async.loop.run_in_executor(
-                None,
-                lambda: backend.get_max_patient_counter(client),
-            )
+            return await backend.get_max_patient_counter(conn)
         finally:
-            await self._resources_async.client_queue.put(client)
+            await self._resources_async.client_queue.put(conn)
 
 
 class ClickHouseAsyncWorker(BaseAsyncInsertWorker):
-    """Async ClickHouse worker: sync driver calls run in executor."""
+    """Async ClickHouse worker using asynch driver (native async)."""
 
     def __init__(
         self,
         insertion_queue: asyncio.Queue,
         query_queue: asyncio.Queue,
         client_queue: asyncio.Queue,
-        loop: asyncio.AbstractEventLoop,
         inserted_lock: asyncio.Lock,
         inserted_shared: list[float],
         batch_size: int,
         queries_per_record: int = 1,
     ) -> None:
         self.client_queue = client_queue
-        self.loop = loop
         super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, queries_per_record)
 
     async def get_connection(self) -> Any:
@@ -113,14 +102,13 @@ class ClickHouseAsyncWorker(BaseAsyncInsertWorker):
         await self.client_queue.put(conn)
 
     async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int]:
-        n = await self.loop.run_in_executor(None, lambda: backend.insert_batch(conn, batch))
+        n = await backend.insert_batch(conn, batch)
         return n, 1
 
 
 async def run_query_worker_clickhouse_async(
     query_queue: asyncio.Queue,
     client_queue: asyncio.Queue,
-    loop: asyncio.AbstractEventLoop,
     queries_lock: asyncio.Lock,
     queries_shared: list[float],
     queries_per_record: int,
@@ -145,7 +133,7 @@ async def run_query_worker_clickhouse_async(
                 if query_rate_limiter is not None:
                     await query_rate_limiter.acquire()
                 t0 = time.perf_counter()
-                rows = await loop.run_in_executor(None, lambda: backend.query_by_primary_key(client, mrn))
+                rows = await backend.query_by_primary_key(client, mrn)
                 total_latency_sec += time.perf_counter() - t0
                 if len(rows) != 1:
                     failed += 1

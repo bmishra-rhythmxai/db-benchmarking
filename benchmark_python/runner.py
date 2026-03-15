@@ -54,7 +54,7 @@ def _worker_for_database(database: str):
 async def get_max_patient_counter_from_db_async(database: str, pgbouncer_enabled: bool = False) -> int:
     import os
     if database == "postgres":
-        from .postgres import backend_async as pg_backend
+        from .postgres import backend as pg_backend
         host = os.environ.get("POSTGRES_HOST") or "localhost"
         port = int(os.environ.get("POSTGRES_PORT") or "5432")
         db_name = "postgres1" if pgbouncer_enabled else "postgres"
@@ -62,16 +62,13 @@ async def get_max_patient_counter_from_db_async(database: str, pgbouncer_enabled
     from .clickhouse import backend as ch_backend
     host = os.environ.get("CLICKHOUSE_HOST") or "clickhouse"
     port = int(os.environ.get("CLICKHOUSE_PORT") or "9000")
-    return await asyncio.get_running_loop().run_in_executor(
-        None,
-        lambda: ch_backend.get_max_patient_counter_standalone(host, port),
-    )
+    return await ch_backend.get_max_patient_counter_standalone(host, port)
 
 
 async def ensure_schema_from_db_async(database: str, pgbouncer_enabled: bool = False) -> None:
     import os
     if database == "postgres":
-        from .postgres import backend_async as pg_backend
+        from .postgres import backend as pg_backend
         host = os.environ.get("POSTGRES_HOST") or "localhost"
         port = int(os.environ.get("POSTGRES_PORT") or "5432")
         db_name = "postgres1" if pgbouncer_enabled else "postgres"
@@ -80,8 +77,7 @@ async def ensure_schema_from_db_async(database: str, pgbouncer_enabled: bool = F
     from .clickhouse import backend as ch_backend
     host = os.environ.get("CLICKHOUSE_HOST") or "clickhouse"
     port = int(os.environ.get("CLICKHOUSE_PORT") or "9000")
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, lambda: ch_backend.init_schema_standalone(host, port))
+    await ch_backend.init_schema_standalone(host, port)
 
 
 async def async_run_load(
@@ -149,7 +145,7 @@ async def async_run_load(
             for _ in range(num_workers):
                 query_tasks.append(asyncio.create_task(
                     postgres.run_query_worker_postgres_async(
-                        query_queue, worker_ctx.select_pool_async,
+                        query_queue, worker_ctx.select_pool,
                         queries_lock, queries_shared,
                         queries_per_record, query_delay_sec, query_rate_limiter, ignore_select_errors,
                     )
@@ -160,7 +156,6 @@ async def async_run_load(
                 query_tasks.append(asyncio.create_task(
                     clickhouse.run_query_worker_clickhouse_async(
                         query_queue, worker_ctx._resources_async.client_queue,
-                        worker_ctx._resources_async.loop,
                         queries_lock, queries_shared,
                         queries_per_record, query_delay_sec, query_rate_limiter, ignore_select_errors,
                     )

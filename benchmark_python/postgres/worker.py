@@ -1,4 +1,4 @@
-"""PostgreSQL insert worker and query worker (async, asyncpg)."""
+"""PostgreSQL insert worker and query worker (asyncpg)."""
 from __future__ import annotations
 
 import asyncio
@@ -9,8 +9,7 @@ from typing import Any
 
 from ..base_worker import BaseAsyncInsertWorker
 from ..config import QUERY_SENTINEL
-from . import backend_async
-from . import backend_pipeline
+from . import backend
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +21,8 @@ class PostgresWorker:
     """PostgreSQL worker context: async setup/teardown and async insert workers (asyncpg)."""
 
     def __init__(self) -> None:
-        self.insert_pool_async = None
-        self.select_pool_async = None
+        self.insert_pool = None
+        self.select_pool = None
         # PgBouncer flip-flop: first batch postgres1, then postgres2, then postgres1, ... (shared across workers)
         self._pgbouncer_use_db1: list[bool] = [True]  # mutable so workers can flip
         self._pgbouncer_flip_lock = asyncio.Lock()
@@ -36,7 +35,7 @@ class PostgresWorker:
         pgbouncer_enabled: bool = False,
     ) -> PostgresWorker:
         """Create asyncpg pools, prewarm, optionally init schema. Returns self (pools stored on instance)."""
-        if self.insert_pool_async is not None:
+        if self.insert_pool is not None:
             raise RuntimeError("PostgresWorker.setup_async() already called")
         host = os.environ.get("POSTGRES_HOST") or DEFAULT_HOST
         port = int(os.environ.get("POSTGRES_PORT") or DEFAULT_PORT)
@@ -44,44 +43,35 @@ class PostgresWorker:
         if pgbouncer_enabled:
             db1 = "postgres1"
             logger.info(
-                "Creating PostgreSQL pools at %s:%d (pgbouncer: %s, pipeline SET+INSERT, flip-flop postgres1/postgres2, %d insert + %d select) ...",
+                "Creating PostgreSQL pools at %s:%d (pgbouncer: %s, flip-flop postgres1/postgres2, %d insert + %d select) ...",
                 host, port, db1, num_workers, num_workers,
             )
-            self.insert_pool_async = await backend_async.create_pool(host, port, num_workers, database=db1)
-            await backend_async.prewarm_pool(self.insert_pool_async, num_workers)
-            self.select_pool_async = await backend_async.create_pool(host, port, num_workers, database=db1)
-            await backend_async.prewarm_pool(self.select_pool_async, num_workers)
-            loop = asyncio.get_running_loop()
-            self._psycopg_pool = await loop.run_in_executor(
-                None,
-                lambda: backend_pipeline.create_psycopg_pool(host, port, num_workers, db1),
-            )
+            self.insert_pool = await backend.create_pool(host, port, num_workers, database=db1)
+            await backend.prewarm_pool(self.insert_pool, num_workers)
+            self.select_pool = await backend.create_pool(host, port, num_workers, database=db1)
+            await backend.prewarm_pool(self.select_pool, num_workers)
         else:
             logger.info(
-                "Creating PostgreSQL async connection pools at %s:%d (%d insert + %d select) ...",
+                "Creating PostgreSQL connection pools at %s:%d (%d insert + %d select) ...",
                 host, port, num_workers, num_workers,
             )
-            self.insert_pool_async = await backend_async.create_pool(host, port, num_workers)
-            await backend_async.prewarm_pool(self.insert_pool_async, num_workers)
-            self.select_pool_async = await backend_async.create_pool(host, port, num_workers)
-            await backend_async.prewarm_pool(self.select_pool_async, num_workers)
+            self.insert_pool = await backend.create_pool(host, port, num_workers)
+            await backend.prewarm_pool(self.insert_pool, num_workers)
+            self.select_pool = await backend.create_pool(host, port, num_workers)
+            await backend.prewarm_pool(self.select_pool, num_workers)
         if init_schema:
-            async with self.insert_pool_async.acquire() as conn:
-                await backend_async.init_schema(conn)
+            async with self.insert_pool.acquire() as conn:
+                await backend.init_schema(conn)
         logger.info("Starting insertions (target %d rows/sec) ...", target_rps)
         return self
 
     async def teardown_async(self) -> None:
-        if self.select_pool_async is not None:
-            await self.select_pool_async.close()
-            self.select_pool_async = None
-        if getattr(self, "_psycopg_pool", None) is not None:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self._psycopg_pool.close)
-            self._psycopg_pool = None
-        if self.insert_pool_async is not None:
-            await self.insert_pool_async.close()
-            self.insert_pool_async = None
+        if self.select_pool is not None:
+            await self.select_pool.close()
+            self.select_pool = None
+        if self.insert_pool is not None:
+            await self.insert_pool.close()
+            self.insert_pool = None
 
     def make_worker_async(
         self,
@@ -96,7 +86,7 @@ class PostgresWorker:
         return PostgresAsyncWorker(
             insertion_queue,
             query_queue,
-            self.insert_pool_async,
+            self.insert_pool,
             inserted_lock,
             inserted_shared,
             batch_size,
@@ -104,16 +94,15 @@ class PostgresWorker:
             pgbouncer_enabled=pgbouncer_enabled,
             pgbouncer_flip_lock=getattr(self, "_pgbouncer_flip_lock", None),
             pgbouncer_use_db1_ref=getattr(self, "_pgbouncer_use_db1", None),
-            psycopg_pool=getattr(self, "_psycopg_pool", None),
         )
 
     async def get_max_patient_counter_async(self) -> int:
-        async with self.select_pool_async.acquire() as conn:
-            return await backend_async.get_max_patient_counter(conn)
+        async with self.select_pool.acquire() as conn:
+            return await backend.get_max_patient_counter(conn)
 
 
 class PostgresAsyncWorker(BaseAsyncInsertWorker):
-    """Async PostgreSQL insert worker. When pgbouncer_enabled, uses psycopg3 connection.pipeline() for SET+INSERT in one round-trip."""
+    """Async PostgreSQL insert worker. When pgbouncer_enabled, uses SET pgbouncer.database then INSERT (async)."""
 
     def __init__(
         self,
@@ -127,38 +116,27 @@ class PostgresAsyncWorker(BaseAsyncInsertWorker):
         pgbouncer_enabled: bool = False,
         pgbouncer_flip_lock: asyncio.Lock | None = None,
         pgbouncer_use_db1_ref: list[bool] | None = None,
-        psycopg_pool: Any = None,
     ) -> None:
         self.insert_pool = insert_pool
         self.pgbouncer_enabled = pgbouncer_enabled
         self._pgbouncer_flip_lock = pgbouncer_flip_lock
         self._pgbouncer_use_db1_ref = pgbouncer_use_db1_ref  # shared [True]/[False]: True = next is postgres1
-        self._psycopg_pool = psycopg_pool
         super().__init__(insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, queries_per_record)
 
     async def get_connection(self) -> Any:
-        if self.pgbouncer_enabled and self._psycopg_pool is not None:
-            return self._psycopg_pool  # pipeline path uses pool directly per batch
         return await self.insert_pool.acquire()
 
     async def release_connection(self, conn: Any) -> None:
-        if self.pgbouncer_enabled and self._psycopg_pool is not None:
-            return  # no-op; pipeline path gets conn from pool inside executor
-        self.insert_pool.release(conn)
+        await self.insert_pool.release(conn)
 
     async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int]:
-        if self.pgbouncer_enabled and self._psycopg_pool is not None and self._pgbouncer_flip_lock is not None and self._pgbouncer_use_db1_ref is not None:
+        if self.pgbouncer_enabled and self._pgbouncer_flip_lock is not None and self._pgbouncer_use_db1_ref is not None:
             async with self._pgbouncer_flip_lock:
                 use_db1 = self._pgbouncer_use_db1_ref[0]
                 self._pgbouncer_use_db1_ref[0] = not use_db1
-                db = backend_async.PGBOUNCER_DB1 if use_db1 else backend_async.PGBOUNCER_DB2
-            loop = asyncio.get_running_loop()
-            n = await loop.run_in_executor(
-                None,
-                lambda: backend_pipeline.insert_batch_pipeline_with_pool(conn, batch, db),
-            )
-            return n, 1
-        n = await backend_async.insert_batch(conn, batch)
+                db = backend.PGBOUNCER_DB1 if use_db1 else backend.PGBOUNCER_DB2
+            return await backend.insert_batch_pgbouncer_set(conn, batch, db)
+        n = await backend.insert_batch(conn, batch)
         return n, 1
 
 
@@ -189,7 +167,7 @@ async def run_query_worker_postgres_async(
                 if query_rate_limiter is not None:
                     await query_rate_limiter.acquire()
                 t0 = time.perf_counter()
-                rows = await backend_async.query_by_primary_key(conn, mrn)
+                rows = await backend.query_by_primary_key(conn, mrn)
                 total_latency_sec += time.perf_counter() - t0
                 if len(rows) != 1:
                     failed += 1
