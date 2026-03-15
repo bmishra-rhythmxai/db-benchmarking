@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_HOST = "localhost"
 DEFAULT_PORT = 5432
+# When pgbouncer is enabled, connect to pgbouncer (not Postgres directly).
+DEFAULT_PGBOUNCER_HOST = "pgbouncer"
+DEFAULT_PGBOUNCER_PORT = 6432
 
 
 class PostgresWorker:
@@ -37,9 +40,13 @@ class PostgresWorker:
         """Create asyncpg pools, prewarm, optionally init schema. Returns self (pools stored on instance)."""
         if self.insert_pool is not None:
             raise RuntimeError("PostgresWorker.setup_async() already called")
-        host = os.environ.get("POSTGRES_HOST") or DEFAULT_HOST
-        port = int(os.environ.get("POSTGRES_PORT") or DEFAULT_PORT)
         self.pgbouncer_enabled = pgbouncer_enabled
+        if pgbouncer_enabled:
+            host = os.environ.get("POSTGRES_PGBOUNCER_HOST") or DEFAULT_PGBOUNCER_HOST
+            port = int(os.environ.get("POSTGRES_PGBOUNCER_PORT") or str(DEFAULT_PGBOUNCER_PORT))
+        else:
+            host = os.environ.get("POSTGRES_HOST") or DEFAULT_HOST
+            port = int(os.environ.get("POSTGRES_PORT") or str(DEFAULT_PORT))
         if pgbouncer_enabled:
             db1 = "postgres1"
             logger.info(

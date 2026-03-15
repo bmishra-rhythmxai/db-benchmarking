@@ -51,12 +51,22 @@ def _worker_for_database(database: str):
     return clickhouse.ClickHouseWorker
 
 
+def _postgres_host_port(pgbouncer_enabled: bool) -> tuple[str, int]:
+    import os
+    if pgbouncer_enabled:
+        host = os.environ.get("POSTGRES_PGBOUNCER_HOST") or "pgbouncer"
+        port = int(os.environ.get("POSTGRES_PGBOUNCER_PORT") or "6432")
+    else:
+        host = os.environ.get("POSTGRES_HOST") or "localhost"
+        port = int(os.environ.get("POSTGRES_PORT") or "5432")
+    return host, port
+
+
 async def get_max_patient_counter_from_db_async(database: str, pgbouncer_enabled: bool = False) -> int:
     import os
     if database == "postgres":
         from .postgres import backend as pg_backend
-        host = os.environ.get("POSTGRES_HOST") or "localhost"
-        port = int(os.environ.get("POSTGRES_PORT") or "5432")
+        host, port = _postgres_host_port(pgbouncer_enabled)
         db_name = "postgres1" if pgbouncer_enabled else "postgres"
         return await pg_backend.get_max_patient_counter_standalone(host, port, database=db_name)
     from .clickhouse import backend as ch_backend
@@ -69,8 +79,7 @@ async def ensure_schema_from_db_async(database: str, pgbouncer_enabled: bool = F
     import os
     if database == "postgres":
         from .postgres import backend as pg_backend
-        host = os.environ.get("POSTGRES_HOST") or "localhost"
-        port = int(os.environ.get("POSTGRES_PORT") or "5432")
+        host, port = _postgres_host_port(pgbouncer_enabled)
         db_name = "postgres1" if pgbouncer_enabled else "postgres"
         await pg_backend.init_schema_standalone(host, port, database=db_name)
         return

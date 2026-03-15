@@ -15,6 +15,9 @@ import (
 
 const defaultHost = "localhost"
 const defaultPort = 5432
+// When PgbouncerEnabled, connect to pgbouncer (not Postgres directly).
+const defaultPgbouncerHost = "pgbouncer"
+const defaultPgbouncerPort = 6432
 
 const pgbouncerDB1 = "postgres1"
 const pgbouncerDB2 = "postgres2"
@@ -96,14 +99,29 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 	if c.insertPool != nil {
 		log.Fatal("postgres Setup already called")
 	}
-	host := os.Getenv("POSTGRES_HOST")
-	if host == "" {
-		host = defaultHost
-	}
-	port := defaultPort
-	if p := os.Getenv("POSTGRES_PORT"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			port = v
+	var host string
+	var port int
+	if c.PgbouncerEnabled {
+		host = os.Getenv("POSTGRES_PGBOUNCER_HOST")
+		if host == "" {
+			host = defaultPgbouncerHost
+		}
+		port = defaultPgbouncerPort
+		if p := os.Getenv("POSTGRES_PGBOUNCER_PORT"); p != "" {
+			if v, err := strconv.Atoi(p); err == nil {
+				port = v
+			}
+		}
+	} else {
+		host = os.Getenv("POSTGRES_HOST")
+		if host == "" {
+			host = defaultHost
+		}
+		port = defaultPort
+		if p := os.Getenv("POSTGRES_PORT"); p != "" {
+			if v, err := strconv.Atoi(p); err == nil {
+				port = v
+			}
 		}
 	}
 	ctx := context.Background()

@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
       - name: load-runner-python
-        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-python:v0.0.40
+        image: devgwrxacr.azurecr.io/bikash/db-benchmarking-python:v0.0.1
         imagePullPolicy: IfNotPresent
         command: ["sleep", "infinity"]
         resources:

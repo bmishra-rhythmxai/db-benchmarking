@@ -3,12 +3,14 @@
 # Exec in and run: /app/loadrunner --database postgres --duration 60
 # Or: /app/loadrunner --database clickhouse --duration 60
 
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
 RUN apk add --no-cache git
 WORKDIR /app
-COPY benchmark-go/ .
+COPY go.mod go.sum ./
+COPY main.go ./
+COPY benchmark-go/ ./benchmark-go/
 RUN go mod tidy && go mod download && go mod verify
-RUN CGO_ENABLED=0 go build -o loadrunner ./cmd/loadrunner
+RUN CGO_ENABLED=0 go build -o loadrunner .
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates procps bash

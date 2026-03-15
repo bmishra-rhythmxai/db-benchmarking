@@ -36,7 +36,6 @@ $1 ~ /^(sda|sdb)/ {
 }'
 
 TAG=$(az acr repository show-tags --name devgwrxacr --repository bikash/pgbouncer --orderby time_desc --top 1 --output tsv | awk -F. '{printf "%s.%s.%d", $1, $2, $3+1}')
-export TAG=v0.0.1
 docker build -t devgwrxacr.azurecr.io/bikash/pgbouncer:${TAG} -f debian-12/Dockerfile .
 docker push devgwrxacr.azurecr.io/bikash/pgbouncer:${TAG}
 sed -i '' "s|devgwrxacr.azurecr.io/bikash/pgbouncer:.*|devgwrxacr.azurecr.io/bikash/pgbouncer:${TAG}|" deployments/postgres.yaml
