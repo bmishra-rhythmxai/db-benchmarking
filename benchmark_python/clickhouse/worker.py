@@ -29,9 +29,9 @@ class ClickHouseWorker:
     def __init__(self) -> None:
         self._resources_async = None
 
-    async def setup_async(self, num_workers: int, target_rps: int, init_schema: bool = True) -> ClickHouseWorker:
+    async def setup(self, num_workers: int, target_rps: int, init_schema: bool = True) -> ClickHouseWorker:
         if self._resources_async is not None:
-            raise RuntimeError("ClickHouseWorker.setup_async() already called")
+            raise RuntimeError("ClickHouseWorker.setup() already called")
         host = os.environ.get("CLICKHOUSE_HOST") or DEFAULT_HOST
         port = int(os.environ.get("CLICKHOUSE_PORT") or DEFAULT_PORT)
         pool_size = num_workers * 2
@@ -46,12 +46,12 @@ class ClickHouseWorker:
         self._resources_async = _ClickHouseResourcesAsync(client_queue, connections)
         return self
 
-    async def teardown_async(self) -> None:
+    async def teardown(self) -> None:
         if self._resources_async is not None:
             await backend.close_pool(self._resources_async.connections)
             self._resources_async = None
 
-    def make_worker_async(
+    def make_worker(
         self,
         insertion_queue: asyncio.Queue,
         query_queue: asyncio.Queue,
@@ -71,7 +71,7 @@ class ClickHouseWorker:
             queries_per_record,
         )
 
-    async def get_max_patient_counter_async(self) -> int:
+    async def get_max_patient_counter(self) -> int:
         conn = await self._resources_async.client_queue.get()
         try:
             return await backend.get_max_patient_counter(conn)
@@ -106,7 +106,7 @@ class ClickHouseAsyncWorker(BaseAsyncInsertWorker):
         return n, 1
 
 
-async def run_query_worker_clickhouse_async(
+async def run_query_worker_clickhouse(
     query_queue: asyncio.Queue,
     client_queue: asyncio.Queue,
     queries_lock: asyncio.Lock,

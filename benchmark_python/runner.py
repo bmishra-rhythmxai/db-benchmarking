@@ -30,11 +30,11 @@ def _query_limiter(queries_per_sec: float) -> AsyncLimiter:
 
 from .producer import (
     SyncCounter,
-    async_run_batch_producer,
-    async_run_producer,
+    run_batch_producer,
+    run_producer,
     build_one_batch,
 )
-from .progress import async_run_progress_logger
+from .progress import run_progress_logger
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,7 @@ def _postgres_host_port(pgbouncer_enabled: bool) -> tuple[str, int]:
     return host, port
 
 
-async def get_max_patient_counter_from_db_async(database: str, pgbouncer_enabled: bool = False) -> int:
+async def get_max_patient_counter_from_db(database: str, pgbouncer_enabled: bool = False) -> int:
     import os
     if database == "postgres":
         from .postgres import backend as pg_backend
@@ -75,7 +75,7 @@ async def get_max_patient_counter_from_db_async(database: str, pgbouncer_enabled
     return await ch_backend.get_max_patient_counter_standalone(host, port)
 
 
-async def ensure_schema_from_db_async(database: str, pgbouncer_enabled: bool = False) -> None:
+async def ensure_schema_from_db(database: str, pgbouncer_enabled: bool = False) -> None:
     import os
     if database == "postgres":
         from .postgres import backend as pg_backend
@@ -89,7 +89,7 @@ async def ensure_schema_from_db_async(database: str, pgbouncer_enabled: bool = F
     await ch_backend.init_schema_standalone(host, port)
 
 
-async def async_run_load(
+async def run_load(
     database: str,
     duration_sec: float,
     batch_size: int,
@@ -104,7 +104,7 @@ async def async_run_load(
     shutdown_event: asyncio.Event | None = None,
     pgbouncer_enabled: bool = False,
 ) -> None:
-    """Async load: asyncio queues, async workers and producers, single process. shutdown_event set on Ctrl+C for smooth exit."""
+    """Run load: asyncio queues, workers and producers, single process. shutdown_event set on Ctrl+C for smooth exit."""
     num_workers = workers
     insertion_queue: asyncio.Queue[Batch | None] = asyncio.Queue(maxsize=max(num_workers * 32, target_rps * 4))
     query_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max(num_workers * 4, batch_size * num_workers * 4, target_rps * 4))
@@ -132,15 +132,15 @@ async def async_run_load(
 
     Worker = _worker_for_database(database)
     worker_ctx = Worker()
-    await worker_ctx.setup_async(num_workers, target_rps, init_schema=True, pgbouncer_enabled=pgbouncer_enabled)
-    worker_inst = worker_ctx.make_worker_async(
+    await worker_ctx.setup(num_workers, target_rps, init_schema=True, pgbouncer_enabled=pgbouncer_enabled)
+    worker_inst = worker_ctx.make_worker(
         insertion_queue, query_queue, inserted_lock, inserted_shared, batch_size, queries_per_record,
         pgbouncer_enabled=pgbouncer_enabled,
     )
     run_query_workers = queries_per_record > 0
 
     progress_task = asyncio.create_task(
-        async_run_progress_logger(
+        run_progress_logger(
             inserted_lock, inserted_shared, progress_stop,
             queries_lock, queries_shared,
             interval_sec=5.0,
@@ -153,7 +153,7 @@ async def async_run_load(
             from . import postgres
             for _ in range(num_workers):
                 query_tasks.append(asyncio.create_task(
-                    postgres.run_query_worker_postgres_async(
+                    postgres.run_query_worker_postgres(
                         query_queue, worker_ctx.select_pool,
                         queries_lock, queries_shared,
                         queries_per_record, query_delay_sec, query_rate_limiter, ignore_select_errors,
@@ -163,7 +163,7 @@ async def async_run_load(
             from . import clickhouse
             for _ in range(num_workers):
                 query_tasks.append(asyncio.create_task(
-                    clickhouse.run_query_worker_clickhouse_async(
+                    clickhouse.run_query_worker_clickhouse(
                         query_queue, worker_ctx._resources_async.client_queue,
                         queries_lock, queries_shared,
                         queries_per_record, query_delay_sec, query_rate_limiter, ignore_select_errors,
@@ -172,12 +172,12 @@ async def async_run_load(
 
     if use_fixed_count:
         next_id = SyncCounter(0)  # will set below
-        max_counter = await worker_ctx.get_max_patient_counter_async()
+        max_counter = await worker_ctx.get_max_patient_counter()
         patient_start_base = max(0, max_counter + 1)
         next_id.value = patient_start_base
         logger.info("Fixed-count mode: producing %d records (base %d)", total_records, patient_start_base)
         producer_task = asyncio.create_task(
-            async_run_producer(
+            run_producer(
                 insertion_queue, num_workers, target_rps, batch_size,
                 patient_start_base, next_id, num_workers, total_records, duplicate_ratio,
             )
@@ -199,7 +199,7 @@ async def async_run_load(
         else:
             await producer_task
     else:
-        max_counter = await worker_ctx.get_max_patient_counter_async()
+        max_counter = await worker_ctx.get_max_patient_counter()
         patient_start_base = max(0, max_counter + 1)
         next_id = SyncCounter(patient_start_base)
         logger.info("Producers using atomic counter starting at %d (max in DB: %d)", patient_start_base, max_counter)
@@ -218,7 +218,7 @@ async def async_run_load(
         insert_rate_limiter = _insert_limiter(target_rps, batch_size)
 
         async def batch_producer(i: int) -> None:
-            await async_run_batch_producer(
+            await run_batch_producer(
                 insertion_queue, pre_built[i], batch_size, patient_start_base, next_id,
                 triggers[i], triggers[(i + 1) % producer_tasks],
                 producer_stop, duplicate_ratio,
@@ -256,7 +256,7 @@ async def async_run_load(
             await query_queue.put(QUERY_SENTINEL)
         await asyncio.gather(*query_tasks)
 
-    await worker_ctx.teardown_async()
+    await worker_ctx.teardown()
 
     run_end = time.perf_counter()
     total_inserted_final = int(inserted_shared[0])

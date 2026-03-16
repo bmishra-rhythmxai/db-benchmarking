@@ -68,14 +68,17 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 	if len(pair.Originals)+len(pair.Duplicates) == 0 {
 		return
 	}
-	conn := w.Backend.GetConn()
-	defer w.Backend.ReleaseConn(conn)
 
 	var totalRows, totalOriginals, totalDuplicates, totalStatements int
 	var totalLatencySec float64
 
+	// Use a separate connection per batch when we have both originals and duplicates,
+	// so we never send two SET pgbouncer.database + INSERT on the same connection
+	// back-to-back (PgBouncer rejects SET pgbouncer.database when already in transaction).
 	if len(pair.Originals) > 0 {
+		conn := w.Backend.GetConn()
 		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Originals)
+		w.Backend.ReleaseConn(conn)
 		totalRows += n
 		totalOriginals += nOrig
 		totalDuplicates += nDup
@@ -83,7 +86,9 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 		totalLatencySec += lat
 	}
 	if len(pair.Duplicates) > 0 {
+		conn := w.Backend.GetConn()
 		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Duplicates)
+		w.Backend.ReleaseConn(conn)
 		totalRows += n
 		totalOriginals += nOrig
 		totalDuplicates += nDup

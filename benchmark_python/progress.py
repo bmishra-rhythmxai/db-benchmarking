@@ -88,7 +88,7 @@ def _fmt_query_data(
         f"{CYAN}{avg_latency_ms:>{COL_W}.2f}{RESET}"
     )
 
-async def async_run_progress_logger(
+async def run_progress_logger(
     inserted_lock: asyncio.Lock,
     inserted_shared: list[float],
     stop_event: asyncio.Event,
@@ -96,7 +96,7 @@ async def async_run_progress_logger(
     queries_shared: list[float],
     interval_sec: float = 5.0,
 ) -> None:
-    """Async: log insert/query counts every interval_sec until stop_event is set (same columns as Go)."""
+    """Log insert/query counts every interval_sec until stop_event is set (same columns as Go)."""
     prev_inserted = [0.0, 0.0, 0.0, 0.0, 0.0]
     prev_insert_started = 0.0
     prev_queries = 0.0

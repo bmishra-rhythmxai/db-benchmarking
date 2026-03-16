@@ -42,7 +42,7 @@ def build_one_batch(
     next_id: Any,
     duplicate_ratio: float = DUPLICATE_RATIO,
 ) -> list[Record]:
-    """Build one batch of records (same logic as async_run_producer). Call in order for each producer so build order is deterministic."""
+    """Build one batch of records (same logic as run_producer). Call in order for each producer so build order is deterministic."""
     batch: list[Record] = []
     for _ in range(batch_size):
         if random.random() < duplicate_ratio:
@@ -74,7 +74,7 @@ def build_one_batch(
     return batch
 
 
-async def async_run_batch_producer(
+async def run_batch_producer(
     insertion_queue: asyncio.Queue[list[Record] | None],
     initial_batch: list[Record],
     batch_size: int,
@@ -102,7 +102,7 @@ async def async_run_batch_producer(
         batch = build_one_batch(batch_size, patient_start_base, next_id, duplicate_ratio)
 
 
-async def async_run_producer(
+async def run_producer(
     insertion_queue: asyncio.Queue[list[Record] | None],
     num_workers: int,
     target_rps: int,

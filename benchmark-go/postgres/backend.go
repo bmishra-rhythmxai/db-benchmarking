@@ -6,18 +6,22 @@ import (
 	"errors"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
-	"github.com/db-benchmarking/benchmark-go"
-	"github.com/jackc/pgx/v5"
+	benchmarkgo "github.com/db-benchmarking/benchmark-go"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // BuildInsertStatement returns the INSERT upsert SQL and args for the given rows (for use with Exec or Batch.Queue).
-func BuildInsertStatement(rows []benchmarkgo.RowForDB) (sql string, args []interface{}, err error) {
+// placeholderStart is the first placeholder number (default 1).
+func BuildInsertStatement(rows []benchmarkgo.RowForDB, placeholderStart int) (sql string, args []interface{}, err error) {
 	if len(rows) == 0 {
 		return "", nil, nil
+	}
+	if placeholderStart <= 0 {
+		placeholderStart = 1
 	}
 	now := time.Now().UTC()
 	updateCols := make([]string, 0, len(hl7Columns)-1)
@@ -42,7 +46,7 @@ func BuildInsertStatement(rows []benchmarkgo.RowForDB) (sql string, args []inter
 	}
 	placeholders := ""
 	args = make([]interface{}, 0, len(rows)*len(hl7Columns))
-	idx := 1
+	idx := placeholderStart
 	for i := range rows {
 		if i > 0 {
 			placeholders += ", "
@@ -66,6 +70,21 @@ func BuildInsertStatement(rows []benchmarkgo.RowForDB) (sql string, args []inter
 	sql = "INSERT INTO hl7_messages (" + cols + ") VALUES " + placeholders +
 		" ON CONFLICT (medical_record_number) DO UPDATE SET " + setClause
 	return sql, args, nil
+}
+
+// BuildPgbouncerSetInsertStatement returns one statement "SET pgbouncer.database = '...' (simple); INSERT ... (parameterized)".
+// SET is inlined; INSERT uses $1, $2, ... and args are the insert args only. db must be postgres1 or postgres2.
+func BuildPgbouncerSetInsertStatement(rows []benchmarkgo.RowForDB, db string) (sql string, args []interface{}, err error) {
+	if len(rows) == 0 {
+		return "", nil, nil
+	}
+	insertSQL, insertArgs, err := BuildInsertStatement(rows, 1)
+	if err != nil {
+		return "", nil, err
+	}
+	safeDB := strings.ReplaceAll(db, "'", "''")
+	combined := "SET pgbouncer.database = '" + safeDB + "'; " + insertSQL
+	return combined, insertArgs, nil
 }
 
 const (
@@ -122,12 +141,11 @@ var hl7Columns = []string{
 
 // CreatePool creates a pgx connection pool using the default database (postgres).
 func CreatePool(ctx context.Context, host string, port int, size int) (*pgxpool.Pool, error) {
-	return CreatePoolWithDB(ctx, host, port, size, benchmarkgo.DBName, false)
+	return CreatePoolWithDB(ctx, host, port, size, benchmarkgo.DBName)
 }
 
 // CreatePoolWithDB creates a pgx connection pool for the given database name (e.g. postgres1, postgres2 for PgBouncer).
-// When useSimpleProtocol is true, queries use the simple protocol (no prepared statements), allowing multiple statements in one string (e.g. SET + INSERT for PgBouncer).
-func CreatePoolWithDB(ctx context.Context, host string, port int, size int, database string, useSimpleProtocol bool) (*pgxpool.Pool, error) {
+func CreatePoolWithDB(ctx context.Context, host string, port int, size int, database string) (*pgxpool.Pool, error) {
 	if database == "" {
 		database = benchmarkgo.DBName
 	}
@@ -138,9 +156,6 @@ func CreatePoolWithDB(ctx context.Context, host string, port int, size int, data
 	}
 	cfg.MaxConns = int32(size)
 	cfg.MinConns = int32(size)
-	if useSimpleProtocol {
-		cfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
-	}
 	return pgxpool.NewWithConfig(ctx, cfg)
 }
 
@@ -253,7 +268,7 @@ func InsertBatch(ctx context.Context, conn *pgxpool.Conn, rows []benchmarkgo.Row
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	sql, args, err := BuildInsertStatement(rows)
+	sql, args, err := BuildInsertStatement(rows, 1)
 	if err != nil {
 		return 0, err
 	}

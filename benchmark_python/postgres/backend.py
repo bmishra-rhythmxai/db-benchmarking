@@ -153,42 +153,13 @@ async def init_schema(conn: asyncpg.Connection) -> None:
     logger.info("Table hl7_messages created with hash partitioning (modulus %d)", HASH_PARTITION_MODULUS)
 
 
-def _to_pg_literal(val: Any) -> str:
-    """Format a value as a PostgreSQL literal (no prepared statement / inlined in SQL)."""
-    if val is None:
-        return "NULL"
-    if isinstance(val, str):
-        return "'" + val.replace("'", "''") + "'"
-    if isinstance(val, datetime):
-        return "'" + val.isoformat().replace("'", "''") + "'"
-    if isinstance(val, bool):
-        return "TRUE" if val else "FALSE"
-    if isinstance(val, (int, float)):
-        return str(val)
-    return "'" + str(val).replace("'", "''") + "'"
-
-
-def _build_insert_sql_with_literals(rows: list[tuple[str, str, str]]) -> str:
-    """Build INSERT SQL with all values inlined as literals (for one concatenated SET+INSERT string, no params)."""
-    if not rows:
-        return ""
-    mapped = [_row_from_producer_tuple(r) for r in rows]
-    cols = ", ".join(_HL7_COLUMNS)
-    update_cols = [c for c in _HL7_COLUMNS if c != "medical_record_number"]
-    set_clause = ", ".join(f"{c} = EXCLUDED.{c}" for c in update_cols)
-    values_list = []
-    for row in mapped:
-        literals = ", ".join(_to_pg_literal(v) for v in row)
-        values_list.append(f"({literals})")
-    values_sql = ", ".join(values_list)
-    return (
-        f"INSERT INTO hl7_messages ({cols}) VALUES {values_sql} "
-        f"ON CONFLICT (medical_record_number) DO UPDATE SET {set_clause}"
-    )
-
-
-def _build_insert_sql_and_args(rows: list[tuple[str, str, str]]) -> tuple[str, list[Any]]:
-    """Build parameterized INSERT SQL and flat args for hl7_messages. Returns (sql, args)."""
+def _build_insert_sql_and_args(
+    rows: list[tuple[str, str, str]],
+    *,
+    placeholder_start: int = 1,
+) -> tuple[str, list[Any]]:
+    """Build parameterized INSERT SQL and flat args for hl7_messages. Returns (sql, args).
+    placeholder_start: first placeholder number (default 1; use 2 when prepending SET pgbouncer.database = $1)."""
     if not rows:
         return "", []
     mapped = [_row_from_producer_tuple(r) for r in rows]
@@ -201,7 +172,7 @@ def _build_insert_sql_and_args(rows: list[tuple[str, str, str]]) -> tuple[str, l
         args.extend(row)
     placeholders_list = []
     for r in range(len(mapped)):
-        base = r * n + 1
+        base = r * n + placeholder_start
         placeholders_list.append("(" + ", ".join(f"${base + j}" for j in range(n)) + ")")
     values_sql = ", ".join(placeholders_list)
     sql = (
@@ -220,24 +191,26 @@ async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]
     return len(rows)
 
 
-# PgBouncer: one pool, flip-flop between postgres1 and postgres2 per batch via SET pgbouncer.database.
+# PgBouncer: flip-flop between postgres1 and postgres2 per batch; SET (simple) prepended to parameterized INSERT.
 PGBOUNCER_DB1 = "postgres1"
 PGBOUNCER_DB2 = "postgres2"
 
 
-async def insert_batch_pgbouncer_set(
+async def insert_batch_with_pgbouncer_set(
     conn: asyncpg.Connection,
     rows: list[tuple[str, str, str]],
     database: str,
-) -> tuple[int, int]:
-    """Send SET pgbouncer.database and INSERT as one concatenated string (literals inlined; no prepared statement). Returns (rows_inserted, 1)."""
+) -> int:
+    """Execute SET pgbouncer.database = '...'; INSERT ... in one round-trip. PgBouncer strips SET, forwards INSERT. Returns rows inserted."""
     if not rows:
-        return 0, 0
+        return 0
+    if database not in (PGBOUNCER_DB1, PGBOUNCER_DB2):
+        raise ValueError(f"pgbouncer database must be {PGBOUNCER_DB1!r} or {PGBOUNCER_DB2!r}, got {database!r}")
     safe_db = database.replace("'", "''")
-    insert_sql = _build_insert_sql_with_literals(rows)
-    combined = f"SET pgbouncer.database = '{safe_db}'; {insert_sql}"
-    await conn.execute(combined)
-    return len(rows), 1
+    insert_sql, insert_args = _build_insert_sql_and_args(rows, placeholder_start=1)
+    combined_sql = f"SET pgbouncer.database = '{safe_db}'; " + insert_sql
+    await conn.execute(combined_sql, *insert_args)
+    return len(rows)
 
 
 async def query_by_primary_key(conn: asyncpg.Connection, medical_record_number: str) -> list:

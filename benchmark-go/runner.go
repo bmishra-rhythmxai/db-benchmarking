@@ -83,8 +83,15 @@ func (r *Router) Run(ctx context.Context) {
 			}
 			idx := r.nextIndex % len(r.WorkerQueues)
 			r.nextIndex = (r.nextIndex + 1) % len(r.WorkerQueues)
-			r.WorkerQueues[idx] <- pair
-			AddInsertStarted(1)
+			select {
+			case <-ctx.Done():
+				for i := range r.WorkerQueues {
+					close(r.WorkerQueues[i])
+				}
+				return
+			case r.WorkerQueues[idx] <- pair:
+				AddInsertStarted(1)
+			}
 		}
 	}
 }

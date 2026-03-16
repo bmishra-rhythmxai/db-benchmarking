@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -23,11 +22,10 @@ const pgbouncerDB1 = "postgres1"
 const pgbouncerDB2 = "postgres2"
 
 // Backend holds the pool and implements benchmarkgo.InsertBackend.
-// When pgbouncerMode is true, InsertBatch flip-flops postgres1/postgres2 via atomic boolean (first batch = postgres1).
+// When pgbouncerMode is true, InsertBatch runs SET pgbouncer.database prepended to INSERT, flip-flopping postgres1/postgres2.
 type Backend struct {
-	pool          *pgxpool.Pool
-	pgbouncerMode bool
-	// useDB1: true = next batch uses postgres1. Flipped after each batch.
+	pool            *pgxpool.Pool
+	pgbouncerMode   bool
 	pgbouncerUseDB1 atomic.Bool
 }
 
@@ -49,37 +47,34 @@ func (b *Backend) ReleaseConn(c interface{}) {
 }
 
 // InsertBatch inserts rows using the given connection (must be *pgxpool.Conn). Returns (rowsInserted, statementCount, error).
-// When pgbouncerMode is true, sends SET pgbouncer.database and INSERT as one concatenated string (simple protocol, no prepared statement), flip-flopping postgres1/postgres2.
+// When pgbouncerMode is true, runs one round-trip: "SET pgbouncer.database = '...'; INSERT ..." (PgBouncer strips SET, forwards INSERT).
 func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, int, error) {
 	c, ok := conn.(*pgxpool.Conn)
 	if !ok {
 		return 0, 0, nil
 	}
 	ctx := context.Background()
-	if !b.pgbouncerMode || len(rows) == 0 {
-		n, err := InsertBatch(ctx, c, rows)
-		if err != nil {
-			return n, 0, err
+	if b.pgbouncerMode && len(rows) > 0 {
+		useDB1 := b.pgbouncerUseDB1.Load()
+		b.pgbouncerUseDB1.Store(!useDB1)
+		db := pgbouncerDB1
+		if !useDB1 {
+			db = pgbouncerDB2
 		}
-		return n, 1, nil
+		sql, args, err := BuildPgbouncerSetInsertStatement(rows, db)
+		if err != nil {
+			return 0, 0, err
+		}
+		if _, err := c.Exec(ctx, sql, args...); err != nil {
+			return 0, 0, err
+		}
+		return len(rows), 1, nil
 	}
-	useDB1 := b.pgbouncerUseDB1.Load()
-	b.pgbouncerUseDB1.Store(!useDB1)
-	db := pgbouncerDB1
-	if !useDB1 {
-		db = pgbouncerDB2
-	}
-	insertSQL, insertArgs, err := BuildInsertStatement(rows)
+	n, err := InsertBatch(ctx, c, rows)
 	if err != nil {
-		return 0, 0, err
+		return n, 0, err
 	}
-	setSQL := "SET pgbouncer.database = '" + strings.ReplaceAll(db, "'", "''") + "'"
-	combined := setSQL + "; " + insertSQL
-	_, err = c.Exec(ctx, combined, insertArgs...)
-	if err != nil {
-		return 0, 0, err
-	}
-	return len(rows), 1, nil
+	return n, 1, nil
 }
 
 // Context handles setup/teardown and query workers for PostgreSQL.
@@ -121,9 +116,9 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 	}
 	ctx := context.Background()
 	if c.PgbouncerEnabled {
-		log.Printf("Creating PostgreSQL connection pool at %s:%d (pgbouncer: postgres1, flip-flop postgres1/postgres2, %d insert)",
+		log.Printf("Creating PostgreSQL connection pool at %s:%d (pgbouncer: postgres1, SET pgbouncer.database + INSERT flip-flop postgres1/postgres2, %d insert)",
 			host, port, numWorkers)
-		insertPool, err := CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1, true)
+		insertPool, err := CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1)
 		if err != nil {
 			return nil, err
 		}
@@ -132,7 +127,7 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 			insertPool.Close()
 			return nil, err
 		}
-		c.selectPool, _ = CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1, true)
+		c.selectPool, _ = CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1)
 		if c.selectPool != nil {
 			_ = PrewarmPool(ctx, c.selectPool, numWorkers)
 		}
@@ -145,7 +140,7 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 		}
 		log.Printf("Starting insertions (target %d rows/sec) ...", targetRPS)
 		be := &Backend{pool: insertPool, pgbouncerMode: true}
-		be.pgbouncerUseDB1.Store(true) // first batch uses postgres1
+		be.pgbouncerUseDB1.Store(true)
 		return be, nil
 	}
 	log.Printf("Creating PostgreSQL connection pool(s) at %s:%d (%d insert connections)",

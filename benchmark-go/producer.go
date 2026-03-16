@@ -125,9 +125,18 @@ func (p *Producer) Run(ctx context.Context) {
 			p.SendCh <- struct{}{}
 			return
 		}
-		p.ProducerQueue <- pair
-		p.SendCh <- struct{}{}
-		pair = buildInsertPair(p.BatchSize, p.PatientStartBase, p.NextID, p.DuplicateRatio)
+		select {
+		case <-ctx.Done():
+			select {
+			case <-p.RecvCh:
+				p.SendCh <- struct{}{}
+			default:
+			}
+			return
+		case p.ProducerQueue <- pair:
+			p.SendCh <- struct{}{}
+			pair = buildInsertPair(p.BatchSize, p.PatientStartBase, p.NextID, p.DuplicateRatio)
+		}
 	}
 }
 

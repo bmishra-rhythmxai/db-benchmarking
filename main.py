@@ -12,9 +12,9 @@ import signal
 from datetime import datetime
 
 from benchmark_python.runner import (
-    async_run_load,
-    ensure_schema_from_db_async,
-    get_max_patient_counter_from_db_async,
+    run_load,
+    ensure_schema_from_db,
+    get_max_patient_counter_from_db,
 )
 
 
@@ -86,8 +86,8 @@ async def main_async() -> None:
         pass
 
     pgbouncer_enabled = args.pgbouncer_enabled
-    await ensure_schema_from_db_async(args.database, pgbouncer_enabled=pgbouncer_enabled)
-    await async_run_load(
+    await ensure_schema_from_db(args.database, pgbouncer_enabled=pgbouncer_enabled)
+    await run_load(
         database=args.database,
         duration_sec=args.duration,
         batch_size=args.batch_size,
@@ -105,9 +105,5 @@ async def main_async() -> None:
     logger.info("Run finished.")
 
 
-def main() -> None:
-    asyncio.run(main_async())
-
-
 if __name__ == "__main__":
-    main()
+    asyncio.run(main_async())
