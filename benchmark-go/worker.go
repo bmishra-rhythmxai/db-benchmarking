@@ -18,8 +18,8 @@ type RowForDB struct {
 type InsertBackend interface {
 	GetConn() interface{}
 	ReleaseConn(interface{})
-	// InsertBatch returns (rowsInserted, statementCount, error). statementCount is 1 for single-statement inserts, 2 for pipeline (postgres1+postgres2).
-	InsertBatch(conn interface{}, rows []RowForDB) (int, int, error)
+	// InsertBatch returns (rowsInserted, statementCount, error). queryHint is the prepared hint string set by the producer, prepended to the INSERT.
+	InsertBatch(conn interface{}, rows []RowForDB, queryHint string) (int, int, error)
 }
 
 // InsertWorker holds state for one insert worker goroutine. Index identifies this worker (0-based).
@@ -76,7 +76,7 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 	// so we never send two hint + INSERT on the same connection back-to-back (optional; hint works in transaction).
 	if len(pair.Originals) > 0 {
 		conn := w.Backend.GetConn()
-		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Originals)
+		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Originals, pair.QueryHint)
 		w.Backend.ReleaseConn(conn)
 		totalRows += n
 		totalOriginals += nOrig
@@ -86,7 +86,7 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 	}
 	if len(pair.Duplicates) > 0 {
 		conn := w.Backend.GetConn()
-		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Duplicates)
+		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Duplicates, pair.QueryHint)
 		w.Backend.ReleaseConn(conn)
 		totalRows += n
 		totalOriginals += nOrig
@@ -103,14 +103,14 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 	AddInsert(int64(totalRows), int64(totalOriginals), int64(totalDuplicates), latencyMicros, stmts64)
 }
 
-func (w *InsertWorker) insertBatch(conn interface{}, batch []*Record) (n int, nOriginals int, nDuplicates int, statements int, latencySec float64) {
+func (w *InsertWorker) insertBatch(conn interface{}, batch []*Record, queryHint string) (n int, nOriginals int, nDuplicates int, statements int, latencySec float64) {
 	rows := make([]RowForDB, len(batch))
 	for i, r := range batch {
 		rows[i] = RowForDB{r.PatientID, r.MessageType, r.JSONMessage}
 	}
 	t0 := time.Now()
 	var err error
-	n, statements, err = w.Backend.InsertBatch(conn, rows)
+	n, statements, err = w.Backend.InsertBatch(conn, rows, queryHint)
 	latencySec = time.Since(t0).Seconds()
 	if err != nil {
 		log.Printf("InsertBatch error: %v", err)

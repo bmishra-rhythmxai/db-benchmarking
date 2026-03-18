@@ -191,24 +191,30 @@ async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]
     return len(rows)
 
 
-# PgBouncer: alternate postgres1/postgres2 by batch index; query hint (first comment) prepended to parameterized INSERT.
+# PgBouncer: query_hint is the prepared hint string (two separate comments) prepended to INSERT.
 PGBOUNCER_DB1 = "postgres1"
 PGBOUNCER_DB2 = "postgres2"
+
+
+def database_from_query_hint(query_hint: str) -> str:
+    """Extract postgres1/postgres2 from the hint for stats; empty if not found."""
+    if "= 'postgres1'" in query_hint:
+        return PGBOUNCER_DB1
+    if "= 'postgres2'" in query_hint:
+        return PGBOUNCER_DB2
+    return ""
 
 
 async def insert_batch_with_pgbouncer_hint(
     conn: asyncpg.Connection,
     rows: list[tuple[str, str, str]],
-    database: str,
+    query_hint: str,
 ) -> int:
-    """Execute /* pgbouncer.database = '...' */ INSERT ... in one round-trip. PgBouncer uses hint, forwards full query. Returns rows inserted."""
+    """Execute query_hint + INSERT in one round-trip. query_hint is the prepared string from the producer. Returns rows inserted."""
     if not rows:
         return 0
-    if database not in (PGBOUNCER_DB1, PGBOUNCER_DB2):
-        raise ValueError(f"pgbouncer database must be {PGBOUNCER_DB1!r} or {PGBOUNCER_DB2!r}, got {database!r}")
-    safe_db = database.replace("'", "''")
     insert_sql, insert_args = _build_insert_sql_and_args(rows, placeholder_start=1)
-    combined_sql = f"/* pgbouncer.database = '{safe_db}' */ " + insert_sql
+    combined_sql = query_hint + insert_sql
     await conn.execute(combined_sql, *insert_args)
     return len(rows)
 

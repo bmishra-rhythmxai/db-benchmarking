@@ -31,9 +31,6 @@ class PostgresWorker(BaseAsyncInsertWorker):
         self.insert_pool = None
         self.select_pool = None
         self.pgbouncer_enabled = False
-        # Deterministic alternation by batch index so postgres1 and postgres2 get the same count (or off-by-one if total is odd).
-        # Plain int is effectively atomic under asyncio: no await between read and increment, so no other task can run.
-        self._pgbouncer_batch_index = 0
         # BaseAsyncInsertWorker attributes (set in make_worker before run() is used)
         self.insertion_queue = None
         self.query_queue = None
@@ -91,7 +88,7 @@ class PostgresWorker(BaseAsyncInsertWorker):
 
     def make_worker(
         self,
-        insertion_queue: asyncio.Queue,
+        insertion_queue: asyncio.Queue[tuple[str, list] | None],
         query_queue: asyncio.Queue,
         inserted_lock: asyncio.Lock,
         inserted_shared: list[float],
@@ -121,15 +118,15 @@ class PostgresWorker(BaseAsyncInsertWorker):
     async def release_connection(self, conn: Any) -> None:
         await self.insert_pool.release(conn)
 
-    async def _flush(self, batch: list) -> None:
+    async def _flush(self, batch: list, query_hint: str = "") -> None:
         """When pgbouncer is enabled, use a separate connection per sub-batch (originals,
         then duplicates) so only one hint + INSERT runs per connection.
-        Otherwise delegate to base _flush.
+        query_hint is the prepared hint string set by the producer.
         """
         if not batch:
             return
         if not self.pgbouncer_enabled:
-            await super()._flush(batch)
+            await super()._flush(batch, query_hint)
             return
         originals, duplicates = _split_originals_duplicates(batch)
         async with self.inserted_lock:
@@ -143,7 +140,7 @@ class PostgresWorker(BaseAsyncInsertWorker):
                 try:
                     rows_db = [(r[0], r[1], r[2]) for r in originals]
                     t0 = time.perf_counter()
-                    n, stmts, db_used = await self.insert_batch(conn, rows_db)
+                    n, stmts, db_used = await self.insert_batch(conn, rows_db, query_hint)
                     total_rows += n
                     total_latency_sec += time.perf_counter() - t0
                     n_statements += stmts
@@ -160,7 +157,7 @@ class PostgresWorker(BaseAsyncInsertWorker):
                 try:
                     rows_db = [(r[0], r[1], r[2]) for r in duplicates]
                     t0 = time.perf_counter()
-                    n, stmts, db_used = await self.insert_batch(conn, rows_db)
+                    n, stmts, db_used = await self.insert_batch(conn, rows_db, query_hint)
                     total_rows += n
                     total_latency_sec += time.perf_counter() - t0
                     n_statements += stmts
@@ -190,15 +187,14 @@ class PostgresWorker(BaseAsyncInsertWorker):
                 if self.inserted_shared[5] < 0:
                     self.inserted_shared[5] = 0
 
-    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int, str | None]:
-        """Returns (rows_inserted, statement_count, db_used). db_used is 'postgres1'|'postgres2' when pgbouncer, else None."""
-        if self.pgbouncer_enabled:
-            idx = self._pgbouncer_batch_index
-            self._pgbouncer_batch_index += 1
-            use_db1 = (idx % 2) == 0
-            db = backend.PGBOUNCER_DB1 if use_db1 else backend.PGBOUNCER_DB2
-            n = await backend.insert_batch_with_pgbouncer_hint(conn, batch, db)
-            return n, 1, db
+    async def insert_batch(
+        self, conn: Any, batch: list[tuple[str, str, str]], query_hint: str = ""
+    ) -> tuple[int, int, str | None]:
+        """Returns (rows_inserted, statement_count, db_used). query_hint is the prepared hint string."""
+        if self.pgbouncer_enabled and query_hint:
+            n = await backend.insert_batch_with_pgbouncer_hint(conn, batch, query_hint)
+            db_used = backend.database_from_query_hint(query_hint)
+            return n, 1, db_used
         n = await backend.insert_batch(conn, batch)
         return n, 1, None
 

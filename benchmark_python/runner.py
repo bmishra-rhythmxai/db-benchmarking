@@ -32,7 +32,6 @@ from .producer import (
     SyncCounter,
     run_batch_producer,
     run_producer,
-    build_one_batch,
 )
 from .progress import run_progress_logger
 
@@ -106,7 +105,9 @@ async def run_load(
 ) -> None:
     """Run load: asyncio queues, workers and producers, single process. shutdown_event set on Ctrl+C for smooth exit."""
     num_workers = workers
-    insertion_queue: asyncio.Queue[Batch | None] = asyncio.Queue(maxsize=max(num_workers * 32, target_rps * 4))
+    # Queue carries (query_hint, batch); query_hint is the prepared hint string to prepend to the INSERT. Sentinel is INSERTION_SENTINEL.
+    insertion_queue: asyncio.Queue[tuple[str, Batch] | None] = asyncio.Queue(maxsize=max(num_workers * 32, target_rps * 4))
+    next_batch_index = SyncCounter(0)
     query_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max(num_workers * 4, batch_size * num_workers * 4, target_rps * 4))
     inserted_lock = asyncio.Lock()
     inserted_shared: list[float] = [0, 0, 0, 0.0, 0, 0, 0, 0, 0]  # [7]=postgres1, [8]=postgres2
@@ -171,15 +172,14 @@ async def run_load(
                 ))
 
     if use_fixed_count:
-        next_id = SyncCounter(0)  # will set below
         max_counter = await worker_ctx.get_max_patient_counter()
         patient_start_base = max(0, max_counter + 1)
-        next_id.value = patient_start_base
-        logger.info("Fixed-count mode: producing %d records (base %d)", total_records, patient_start_base)
+        logger.info("Fixed-count mode: producing %d records (base %d, batch-index-derived ordinals)", total_records, patient_start_base)
         producer_task = asyncio.create_task(
             run_producer(
                 insertion_queue, num_workers, target_rps, batch_size,
-                patient_start_base, next_id, num_workers, total_records, duplicate_ratio,
+                patient_start_base, next_batch_index, num_workers, total_records, duplicate_ratio,
+                pgbouncer_enabled=pgbouncer_enabled,
             )
         )
         if shutdown_event is not None:
@@ -201,13 +201,8 @@ async def run_load(
     else:
         max_counter = await worker_ctx.get_max_patient_counter()
         patient_start_base = max(0, max_counter + 1)
-        next_id = SyncCounter(patient_start_base)
-        logger.info("Producers using atomic counter starting at %d (max in DB: %d)", patient_start_base, max_counter)
+        logger.info("Producers using batch-index-derived patient ordinals starting at %d (max in DB: %d)", patient_start_base, max_counter)
         producer_stop = shutdown_event if shutdown_event is not None else asyncio.Event()
-        pre_built: list[Batch] = [
-            build_one_batch(batch_size, patient_start_base, next_id, duplicate_ratio)
-            for _ in range(producer_tasks)
-        ]
         triggers: list[asyncio.Queue[None]] = [asyncio.Queue(maxsize=1) for _ in range(producer_tasks)]
         triggers[0].put_nowait(None)
 
@@ -219,10 +214,11 @@ async def run_load(
 
         async def batch_producer(i: int) -> None:
             await run_batch_producer(
-                insertion_queue, pre_built[i], batch_size, patient_start_base, next_id,
+                insertion_queue, batch_size, patient_start_base, next_batch_index,
                 triggers[i], triggers[(i + 1) % producer_tasks],
                 producer_stop, duplicate_ratio,
                 insert_rate_limiter,
+                pgbouncer_enabled=pgbouncer_enabled,
             )
 
         duration_task = asyncio.create_task(stop_after_duration())

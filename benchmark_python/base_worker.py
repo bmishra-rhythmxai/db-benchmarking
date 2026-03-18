@@ -51,7 +51,7 @@ class BaseAsyncInsertWorker(ABC):
 
     def __init__(
         self,
-        insertion_queue: asyncio.Queue[Batch | None],
+        insertion_queue: asyncio.Queue[tuple[str, Batch] | None],
         query_queue: asyncio.Queue[Any],
         inserted_lock: asyncio.Lock,
         inserted_shared: list[float],
@@ -74,11 +74,11 @@ class BaseAsyncInsertWorker(ABC):
         ...
 
     @abstractmethod
-    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int]:
-        """Insert batch. Returns (rows_inserted, statement_count)."""
+    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]], query_hint: str = "") -> tuple[int, int]:
+        """Insert batch. Returns (rows_inserted, statement_count). query_hint is the prepared hint string set by the producer."""
         ...
 
-    async def _flush(self, batch: Batch) -> None:
+    async def _flush(self, batch: Batch, query_hint: str = "") -> None:
         if not batch:
             return
         originals, duplicates = _split_originals_duplicates(batch)
@@ -92,14 +92,14 @@ class BaseAsyncInsertWorker(ABC):
             if originals:
                 rows_db = [(r[0], r[1], r[2]) for r in originals]
                 t0 = time.perf_counter()
-                n, stmts = await self.insert_batch(conn, rows_db)
+                n, stmts = await self.insert_batch(conn, rows_db, query_hint)
                 total_rows += n
                 total_latency_sec += time.perf_counter() - t0
                 n_statements += stmts
             if duplicates:
                 rows_db = [(r[0], r[1], r[2]) for r in duplicates]
                 t0 = time.perf_counter()
-                n, stmts = await self.insert_batch(conn, rows_db)
+                n, stmts = await self.insert_batch(conn, rows_db, query_hint)
                 total_rows += n
                 total_latency_sec += time.perf_counter() - t0
                 n_statements += stmts
@@ -127,6 +127,7 @@ class BaseAsyncInsertWorker(ABC):
             item = await self.insertion_queue.get()
             if item is INSERTION_SENTINEL:
                 return
+            query_hint, batch = item
             async with self.inserted_lock:
                 self.inserted_shared[6] += 1
-            await self._flush(item)
+            await self._flush(batch, query_hint)

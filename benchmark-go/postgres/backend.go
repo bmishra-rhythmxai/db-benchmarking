@@ -72,9 +72,8 @@ func BuildInsertStatement(rows []benchmarkgo.RowForDB, placeholderStart int) (sq
 	return sql, args, nil
 }
 
-// BuildPgbouncerHintInsertStatement returns one statement "/* pgbouncer.database = '...' */ INSERT ... (parameterized)".
-// Hint is the first comment in the query; INSERT uses $1, $2, ... and args are the insert args only. db must be postgres1 or postgres2.
-func BuildPgbouncerHintInsertStatement(rows []benchmarkgo.RowForDB, db string) (sql string, args []interface{}, err error) {
+// BuildPgbouncerHintInsertStatement prepends the producer-prepared queryHint string to the INSERT.
+func BuildPgbouncerHintInsertStatement(rows []benchmarkgo.RowForDB, queryHint string) (sql string, args []interface{}, err error) {
 	if len(rows) == 0 {
 		return "", nil, nil
 	}
@@ -82,9 +81,18 @@ func BuildPgbouncerHintInsertStatement(rows []benchmarkgo.RowForDB, db string) (
 	if err != nil {
 		return "", nil, err
 	}
-	safeDB := strings.ReplaceAll(db, "'", "''")
-	combined := "/* pgbouncer.database = '" + safeDB + "' */ " + insertSQL
-	return combined, insertArgs, nil
+	return queryHint + insertSQL, insertArgs, nil
+}
+
+// databaseFromQueryHint extracts "postgres1" or "postgres2" from the hint for stats; empty if not found.
+func databaseFromQueryHint(queryHint string) string {
+	if strings.Contains(queryHint, "= 'postgres1'") {
+		return "postgres1"
+	}
+	if strings.Contains(queryHint, "= 'postgres2'") {
+		return "postgres2"
+	}
+	return ""
 }
 
 const (

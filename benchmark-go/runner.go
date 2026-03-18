@@ -38,9 +38,9 @@ type WorkerCtx interface {
 	RunQueryWorker(workerIndex int, queryQueue <-chan *QueryJob, queriesPerRecord int, queryDelaySec float64, ignoreSelectErrors bool)
 }
 
-// Router distributes from producer queue to worker queues with rate limiting. Maintains next worker index for round-robin.
+// Router distributes from producer queue to worker queues with rate limiting. Round-robin to workers; pair.TargetDB is already set by Producer.
 type Router struct {
-	ProducerQueue <-chan *InsertPair
+	ProducerQueue  <-chan *InsertPair
 	WorkerQueues   []chan *InsertPair
 	RateLimiter    *rate.Limiter
 	nextIndex      int
@@ -111,7 +111,7 @@ type LoadRunner struct {
 	runCtx           context.Context
 	cancelRun        context.CancelFunc
 	patientStart     int
-	nextID           atomic.Int64
+	nextBatchIndex   atomic.Int64 // shared by producers; batch index → pair.TargetDB and patient ordinals
 	backend          InsertBackend
 	triggers         []chan struct{}
 	producers        []*Producer
@@ -164,8 +164,7 @@ func (r *LoadRunner) Run(ctx context.Context) {
 
 	maxCounter, _ := r.WorkerCtx.GetMaxPatientCounter()
 	r.patientStart = max(0, maxCounter+1)
-	r.nextID.Store(int64(r.patientStart))
-	log.Printf("Producers using atomic counter starting at %d (max in DB: %d)", r.patientStart, maxCounter)
+	log.Printf("Producers using batch-index-derived patient ordinals starting at %d (max in DB: %d)", r.patientStart, maxCounter)
 
 	r.progressReporter = NewReporter(progressInterval)
 	go r.progressReporter.Run(r.doneCh, r.resultCh)
@@ -194,12 +193,6 @@ func (r *LoadRunner) Run(ctx context.Context) {
 		}
 	}
 
-	// Pre-build one InsertPair per producer (order deterministic).
-	preBuilt := make([]*InsertPair, producerThreads)
-	for i := 0; i < producerThreads; i++ {
-		preBuilt[i] = BuildInitialPair(cfg.BatchSize, r.patientStart, &r.nextID, cfg.DuplicateRatio)
-	}
-
 	r.triggers = make([]chan struct{}, producerThreads)
 	for i := range r.triggers {
 		r.triggers[i] = make(chan struct{}, 1)
@@ -213,9 +206,8 @@ func (r *LoadRunner) Run(ctx context.Context) {
 			i,
 			cfg.BatchSize,
 			r.patientStart,
-			&r.nextID,
+			&r.nextBatchIndex,
 			cfg.DuplicateRatio,
-			preBuilt[i],
 			r.producerQueue,
 			r.triggers[i],
 			r.triggers[(i+1)%producerThreads],

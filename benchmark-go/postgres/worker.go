@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/db-benchmarking/benchmark-go"
@@ -22,11 +21,10 @@ const pgbouncerDB1 = "postgres1"
 const pgbouncerDB2 = "postgres2"
 
 // Backend holds the pool and implements benchmarkgo.InsertBackend.
-// When pgbouncerMode is true, InsertBatch runs query hint /* pgbouncer.database = db */ prepended to INSERT, alternating postgres1/postgres2 by batch index so both DBs get the same count.
+// When pgbouncerMode is true, InsertBatch runs query hint /* pgbouncer.database = db */ prepended to INSERT, using logical batchIndex (from router) so even → postgres1, odd → postgres2 deterministically.
 type Backend struct {
-	pool                 *pgxpool.Pool
-	pgbouncerMode        bool
-	pgbouncerBatchIndex  atomic.Int64 // global batch counter: even → postgres1, odd → postgres2 (deterministic 50/50 across workers)
+	pool          *pgxpool.Pool
+	pgbouncerMode bool
 }
 
 // GetConn acquires a connection from the pool.
@@ -47,29 +45,24 @@ func (b *Backend) ReleaseConn(c interface{}) {
 }
 
 // InsertBatch inserts rows using the given connection (must be *pgxpool.Conn). Returns (rowsInserted, statementCount, error).
-// When pgbouncerMode is true, runs one round-trip: "/* pgbouncer.database = '...' */ INSERT ..." (PgBouncer uses hint, forwards full query).
-func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, int, error) {
+// When pgbouncerMode is true, queryHint (prepared by the producer) is prepended to the INSERT.
+func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB, queryHint string) (int, int, error) {
 	c, ok := conn.(*pgxpool.Conn)
 	if !ok {
 		return 0, 0, nil
 	}
 	ctx := context.Background()
-	if b.pgbouncerMode && len(rows) > 0 {
-		// Deterministic alternation by batch index so postgres1 and postgres2 get exactly the same number of batches (or off-by-one if total is odd).
-		batchIndex := b.pgbouncerBatchIndex.Add(1) - 1
-		useDB1 := (batchIndex % 2) == 0
-		db := pgbouncerDB1
-		if !useDB1 {
-			db = pgbouncerDB2
-		}
-		sql, args, err := BuildPgbouncerHintInsertStatement(rows, db)
+	if b.pgbouncerMode && len(rows) > 0 && queryHint != "" {
+		sql, args, err := BuildPgbouncerHintInsertStatement(rows, queryHint)
 		if err != nil {
 			return 0, 0, err
 		}
 		if _, err := c.Exec(ctx, sql, args...); err != nil {
 			return 0, 0, err
 		}
-		benchmarkgo.AddInsertToDB(db, int64(len(rows)))
+		if db := databaseFromQueryHint(queryHint); db != "" {
+			benchmarkgo.AddInsertToDB(db, int64(len(rows)))
+		}
 		return len(rows), 1, nil
 	}
 	n, err := InsertBatch(ctx, c, rows)
