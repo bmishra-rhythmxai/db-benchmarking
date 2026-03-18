@@ -17,6 +17,8 @@ var (
 	insertLatencyMicros atomic.Int64
 	insertStatements    atomic.Int64
 	insertStarted       atomic.Int64
+	insertPostgres1     atomic.Int64 // rows inserted via pgbouncer.database=postgres1
+	insertPostgres2     atomic.Int64 // rows inserted via pgbouncer.database=postgres2
 	queryCount          atomic.Int64
 	queryLatencyMicros  atomic.Int64
 	queryFailed         atomic.Int64
@@ -38,6 +40,16 @@ func AddInsert(total, originals, duplicates, latencyMicros, statements int64) {
 // AddInsertStarted records one batch handed to a worker (incoming).
 func AddInsertStarted(delta int64) {
 	insertStarted.Add(delta)
+}
+
+// AddInsertToDB records rows inserted for a specific PgBouncer database (postgres1 or postgres2). No-op if db is empty.
+func AddInsertToDB(db string, count int64) {
+	switch db {
+	case "postgres1":
+		insertPostgres1.Add(count)
+	case "postgres2":
+		insertPostgres2.Add(count)
+	}
 }
 
 // AddQuery records a query batch. Latency is in microseconds.
@@ -85,6 +97,8 @@ type InsertedStats struct {
 	Duplicates            float64
 	TotalInsertLatencySec float64
 	InsertStatements      float64
+	Postgres1             float64 // rows inserted via pgbouncer.database=postgres1
+	Postgres2             float64 // rows inserted via pgbouncer.database=postgres2
 }
 
 // QueryStats holds aggregated query stats.
@@ -105,6 +119,8 @@ func loadSnapshot() Snapshot {
 			Duplicates:             float64(insertDuplicates.Load()),
 			TotalInsertLatencySec: float64(insLat) / 1e6,
 			InsertStatements:      float64(insertStatements.Load()),
+			Postgres1:             float64(insertPostgres1.Load()),
+			Postgres2:             float64(insertPostgres2.Load()),
 		},
 		Queries: QueryStats{
 			Count:           float64(queryCount.Load()),
@@ -119,6 +135,8 @@ type Reporter struct {
 	Interval          time.Duration
 	prevInserted      InsertedStats
 	prevInsertStarted int64
+	prevPostgres1     int64
+	prevPostgres2     int64
 	prevQueries       float64
 	prevQueryLatency  float64
 	prevFailed        float64
@@ -154,6 +172,8 @@ func (r *Reporter) Run(doneCh <-chan struct{}, resultCh chan<- Snapshot) {
 			q := snap.Queries.Count
 			totalQueryLatency := snap.Queries.TotalLatencySec
 			failed := snap.Queries.FailedCount
+			curPostgres1 := insertPostgres1.Load()
+			curPostgres2 := insertPostgres2.Load()
 
 			curInsertStarted := insertStarted.Load()
 			intervalInsertStarted := int(curInsertStarted - r.prevInsertStarted)
@@ -164,7 +184,7 @@ func (r *Reporter) Run(doneCh <-chan struct{}, resultCh chan<- Snapshot) {
 			intervalDuplicates := int(duplicates - r.prevInserted.Duplicates)
 			intervalLatency := totalInsertLatency - r.prevInserted.TotalInsertLatencySec
 			intervalStatements := int(insertStatements - r.prevInserted.InsertStatements)
-			r.prevInserted = InsertedStats{total, originals, duplicates, totalInsertLatency, insertStatements}
+			r.prevInserted = InsertedStats{total, originals, duplicates, totalInsertLatency, insertStatements, float64(curPostgres1), float64(curPostgres2)}
 
 			intervalAvgInsertMs := 0.0
 			if intervalTotal > 0 {
@@ -174,6 +194,11 @@ func (r *Reporter) Run(doneCh <-chan struct{}, resultCh chan<- Snapshot) {
 			if total > 0 {
 				cumulativeAvgInsertMs = totalInsertLatency / total * 1000
 			}
+			intervalPostgres1 := int(curPostgres1 - r.prevPostgres1)
+			intervalPostgres2 := int(curPostgres2 - r.prevPostgres2)
+			r.prevPostgres1 = curPostgres1
+			r.prevPostgres2 = curPostgres2
+
 			intervalQ := int(q - r.prevQueries)
 			intervalQueryLatency := totalQueryLatency - r.prevQueryLatency
 			intervalFailed := int(failed - r.prevFailed)
@@ -205,6 +230,11 @@ func (r *Reporter) Run(doneCh <-chan struct{}, resultCh chan<- Snapshot) {
 				_colorCyan, colW, int(originals), _colorReset,
 				_colorCyan, colW, int(duplicates), _colorReset,
 				_colorCyan, colW, 2, cumulativeAvgInsertMs, _colorReset)
+			log.Printf("  DB       postgres1: int %s%*d%s cum %s%*d%s   postgres2: int %s%*d%s cum %s%*d%s",
+				_colorCyan, colW, intervalPostgres1, _colorReset,
+				_colorCyan, colW, int(curPostgres1), _colorReset,
+				_colorCyan, colW, intervalPostgres2, _colorReset,
+				_colorCyan, colW, int(curPostgres2), _colorReset)
 			log.Println(_colorYellow + "  Query    " + padLeft("int_queries", colW) + padLeft("int_failed", colW) + padLeft("int_avg_ms", colW) + " " +
 				padLeft("cum_queries", colW) + padLeft("cum_failed", colW) + padLeft("cum_avg_ms", colW) + _colorReset)
 			log.Printf("           %s%*d%s%s%*d%s%s%*.*f%s %s%*.0f%s%s%*.0f%s%s%*.*f%s",

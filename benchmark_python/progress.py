@@ -99,6 +99,8 @@ async def run_progress_logger(
     """Log insert/query counts every interval_sec until stop_event is set (same columns as Go)."""
     prev_inserted = [0.0, 0.0, 0.0, 0.0, 0.0]
     prev_insert_started = 0.0
+    prev_postgres1 = 0.0
+    prev_postgres2 = 0.0
     prev_queries = 0.0
     prev_query_latency_sec = 0.0
     prev_failed = 0.0
@@ -116,12 +118,18 @@ async def run_progress_logger(
             total_insert_latency_sec = inserted_shared[3]
             insert_statements = inserted_shared[4]
             cur_insert_started = inserted_shared[6]
+            postgres1_cum = inserted_shared[7] if len(inserted_shared) > 7 else 0.0
+            postgres2_cum = inserted_shared[8] if len(inserted_shared) > 8 else 0.0
         async with queries_lock:
             q = int(queries_shared[0])
             total_latency_sec = queries_shared[1]
             failed = queries_shared[2]
         interval_insert_started = int(cur_insert_started - prev_insert_started)
         prev_insert_started = cur_insert_started
+        interval_postgres1 = int(postgres1_cum - prev_postgres1)
+        interval_postgres2 = int(postgres2_cum - prev_postgres2)
+        prev_postgres1 = postgres1_cum
+        prev_postgres2 = postgres2_cum
         interval_total = int(total - prev_inserted[0])
         interval_originals = int(originals - prev_inserted[1])
         interval_duplicates = int(duplicates - prev_inserted[2])
@@ -154,6 +162,13 @@ async def run_progress_logger(
                 int(duplicates),
                 cumulative_avg_insert_ms,
             ),
+        )
+        logger.info(
+            "  DB       postgres1: int %s%*d%s cum %s%*d%s   postgres2: int %s%*d%s cum %s%*d%s",
+            CYAN, COL_W, interval_postgres1, RESET,
+            CYAN, COL_W, int(postgres1_cum), RESET,
+            CYAN, COL_W, interval_postgres2, RESET,
+            CYAN, COL_W, int(postgres2_cum), RESET,
         )
         logger.info("%s", _fmt_query_header())
         logger.info(

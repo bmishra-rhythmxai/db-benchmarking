@@ -25,14 +25,15 @@ DEFAULT_PGBOUNCER_PORT = 6432
 
 
 class PostgresWorker(BaseAsyncInsertWorker):
-    """PostgreSQL worker: context (setup/teardown/pools) and insert worker in one. Uses parameterized INSERT; when pgbouncer_enabled, SET pgbouncer.database prepended to INSERT in one statement."""
+    """PostgreSQL worker: context (setup/teardown/pools) and insert worker in one. Uses parameterized INSERT; when pgbouncer_enabled, query hint /* pgbouncer.database = db */ prepended to INSERT in one statement."""
 
     def __init__(self) -> None:
         self.insert_pool = None
         self.select_pool = None
         self.pgbouncer_enabled = False
-        self._pgbouncer_use_db1: list[bool] = [True]
-        self._pgbouncer_flip_lock = asyncio.Lock()
+        # Deterministic alternation by batch index so postgres1 and postgres2 get the same count (or off-by-one if total is odd).
+        # Plain int is effectively atomic under asyncio: no await between read and increment, so no other task can run.
+        self._pgbouncer_batch_index = 0
         # BaseAsyncInsertWorker attributes (set in make_worker before run() is used)
         self.insertion_queue = None
         self.query_queue = None
@@ -63,7 +64,7 @@ class PostgresWorker(BaseAsyncInsertWorker):
         logger.info(
             "Creating PostgreSQL pools at %s:%d (%d insert + %d select)%s ...",
             host, port, num_workers, num_workers,
-            " (pgbouncer flip-flop postgres1/postgres2)" if pgbouncer_enabled else "",
+            " (pgbouncer alternate postgres1/postgres2 by batch index)" if pgbouncer_enabled else "",
         )
         skip_session_set = pgbouncer_enabled
         pool_kw: dict[str, Any] = {"database": database} if database else {}
@@ -122,7 +123,7 @@ class PostgresWorker(BaseAsyncInsertWorker):
 
     async def _flush(self, batch: list) -> None:
         """When pgbouncer is enabled, use a separate connection per sub-batch (originals,
-        then duplicates) so only one SET pgbouncer.database + INSERT runs per connection.
+        then duplicates) so only one hint + INSERT runs per connection.
         Otherwise delegate to base _flush.
         """
         if not batch:
@@ -142,10 +143,16 @@ class PostgresWorker(BaseAsyncInsertWorker):
                 try:
                     rows_db = [(r[0], r[1], r[2]) for r in originals]
                     t0 = time.perf_counter()
-                    n, stmts = await self.insert_batch(conn, rows_db)
+                    n, stmts, db_used = await self.insert_batch(conn, rows_db)
                     total_rows += n
                     total_latency_sec += time.perf_counter() - t0
                     n_statements += stmts
+                    if db_used:
+                        async with self.inserted_lock:
+                            if db_used == backend.PGBOUNCER_DB1:
+                                self.inserted_shared[7] += n
+                            else:
+                                self.inserted_shared[8] += n
                 finally:
                     await self.release_connection(conn)
             if duplicates:
@@ -153,10 +160,16 @@ class PostgresWorker(BaseAsyncInsertWorker):
                 try:
                     rows_db = [(r[0], r[1], r[2]) for r in duplicates]
                     t0 = time.perf_counter()
-                    n, stmts = await self.insert_batch(conn, rows_db)
+                    n, stmts, db_used = await self.insert_batch(conn, rows_db)
                     total_rows += n
                     total_latency_sec += time.perf_counter() - t0
                     n_statements += stmts
+                    if db_used:
+                        async with self.inserted_lock:
+                            if db_used == backend.PGBOUNCER_DB1:
+                                self.inserted_shared[7] += n
+                            else:
+                                self.inserted_shared[8] += n
                 finally:
                     await self.release_connection(conn)
             n_originals = len(originals)
@@ -177,16 +190,17 @@ class PostgresWorker(BaseAsyncInsertWorker):
                 if self.inserted_shared[5] < 0:
                     self.inserted_shared[5] = 0
 
-    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int]:
-        if self.pgbouncer_enabled and self._pgbouncer_flip_lock and self._pgbouncer_use_db1:
-            async with self._pgbouncer_flip_lock:
-                use_db1 = self._pgbouncer_use_db1[0]
-                self._pgbouncer_use_db1[0] = not use_db1
-                db = backend.PGBOUNCER_DB1 if use_db1 else backend.PGBOUNCER_DB2
-            n = await backend.insert_batch_with_pgbouncer_set(conn, batch, db)
-            return n, 1
+    async def insert_batch(self, conn: Any, batch: list[tuple[str, str, str]]) -> tuple[int, int, str | None]:
+        """Returns (rows_inserted, statement_count, db_used). db_used is 'postgres1'|'postgres2' when pgbouncer, else None."""
+        if self.pgbouncer_enabled:
+            idx = self._pgbouncer_batch_index
+            self._pgbouncer_batch_index += 1
+            use_db1 = (idx % 2) == 0
+            db = backend.PGBOUNCER_DB1 if use_db1 else backend.PGBOUNCER_DB2
+            n = await backend.insert_batch_with_pgbouncer_hint(conn, batch, db)
+            return n, 1, db
         n = await backend.insert_batch(conn, batch)
-        return n, 1
+        return n, 1, None
 
 
 async def run_query_worker_postgres(

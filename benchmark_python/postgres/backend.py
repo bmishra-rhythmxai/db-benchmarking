@@ -159,7 +159,7 @@ def _build_insert_sql_and_args(
     placeholder_start: int = 1,
 ) -> tuple[str, list[Any]]:
     """Build parameterized INSERT SQL and flat args for hl7_messages. Returns (sql, args).
-    placeholder_start: first placeholder number (default 1; use 2 when prepending SET pgbouncer.database = $1)."""
+    placeholder_start: first placeholder number (default 1; hint is a comment so placeholders stay from 1)."""
     if not rows:
         return "", []
     mapped = [_row_from_producer_tuple(r) for r in rows]
@@ -191,24 +191,24 @@ async def insert_batch(conn: asyncpg.Connection, rows: list[tuple[str, str, str]
     return len(rows)
 
 
-# PgBouncer: flip-flop between postgres1 and postgres2 per batch; SET (simple) prepended to parameterized INSERT.
+# PgBouncer: alternate postgres1/postgres2 by batch index; query hint (first comment) prepended to parameterized INSERT.
 PGBOUNCER_DB1 = "postgres1"
 PGBOUNCER_DB2 = "postgres2"
 
 
-async def insert_batch_with_pgbouncer_set(
+async def insert_batch_with_pgbouncer_hint(
     conn: asyncpg.Connection,
     rows: list[tuple[str, str, str]],
     database: str,
 ) -> int:
-    """Execute SET pgbouncer.database = '...'; INSERT ... in one round-trip. PgBouncer strips SET, forwards INSERT. Returns rows inserted."""
+    """Execute /* pgbouncer.database = '...' */ INSERT ... in one round-trip. PgBouncer uses hint, forwards full query. Returns rows inserted."""
     if not rows:
         return 0
     if database not in (PGBOUNCER_DB1, PGBOUNCER_DB2):
         raise ValueError(f"pgbouncer database must be {PGBOUNCER_DB1!r} or {PGBOUNCER_DB2!r}, got {database!r}")
     safe_db = database.replace("'", "''")
     insert_sql, insert_args = _build_insert_sql_and_args(rows, placeholder_start=1)
-    combined_sql = f"SET pgbouncer.database = '{safe_db}'; " + insert_sql
+    combined_sql = f"/* pgbouncer.database = '{safe_db}' */ " + insert_sql
     await conn.execute(combined_sql, *insert_args)
     return len(rows)
 

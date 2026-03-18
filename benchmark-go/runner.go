@@ -274,6 +274,9 @@ func (r *LoadRunner) logSummary(snapshot Snapshot) {
 	log.Printf("Database: %s", cfg.Database)
 	log.Printf("Duration: %.2fs | Workers: %d | Rows inserted: %d (%d original, %d duplicate) | Insert statements: %d",
 		elapsed, cfg.Workers, totalInserted, originals, duplicates, insertStatements)
+	postgres1 := int(snapshot.Inserted.Postgres1)
+	postgres2 := int(snapshot.Inserted.Postgres2)
+	log.Printf("postgres1: %d | postgres2: %d", postgres1, postgres2)
 	log.Printf("Actual insert rate: %.1f rows/sec (target %d)", actualRPS, cfg.TargetRPS)
 	if totalInserted > 0 {
 		log.Printf("Insert latency: avg %.2f ms/row", avgInsertMs)

@@ -73,8 +73,7 @@ func (w *InsertWorker) flushPair(pair *InsertPair) {
 	var totalLatencySec float64
 
 	// Use a separate connection per batch when we have both originals and duplicates,
-	// so we never send two SET pgbouncer.database + INSERT on the same connection
-	// back-to-back (PgBouncer rejects SET pgbouncer.database when already in transaction).
+	// so we never send two hint + INSERT on the same connection back-to-back (optional; hint works in transaction).
 	if len(pair.Originals) > 0 {
 		conn := w.Backend.GetConn()
 		n, nOrig, nDup, stmts, lat := w.insertBatch(conn, pair.Originals)

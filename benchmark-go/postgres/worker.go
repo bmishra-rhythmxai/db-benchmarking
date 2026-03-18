@@ -22,11 +22,11 @@ const pgbouncerDB1 = "postgres1"
 const pgbouncerDB2 = "postgres2"
 
 // Backend holds the pool and implements benchmarkgo.InsertBackend.
-// When pgbouncerMode is true, InsertBatch runs SET pgbouncer.database prepended to INSERT, flip-flopping postgres1/postgres2.
+// When pgbouncerMode is true, InsertBatch runs query hint /* pgbouncer.database = db */ prepended to INSERT, alternating postgres1/postgres2 by batch index so both DBs get the same count.
 type Backend struct {
-	pool            *pgxpool.Pool
-	pgbouncerMode   bool
-	pgbouncerUseDB1 atomic.Bool
+	pool                 *pgxpool.Pool
+	pgbouncerMode        bool
+	pgbouncerBatchIndex  atomic.Int64 // global batch counter: even → postgres1, odd → postgres2 (deterministic 50/50 across workers)
 }
 
 // GetConn acquires a connection from the pool.
@@ -47,7 +47,7 @@ func (b *Backend) ReleaseConn(c interface{}) {
 }
 
 // InsertBatch inserts rows using the given connection (must be *pgxpool.Conn). Returns (rowsInserted, statementCount, error).
-// When pgbouncerMode is true, runs one round-trip: "SET pgbouncer.database = '...'; INSERT ..." (PgBouncer strips SET, forwards INSERT).
+// When pgbouncerMode is true, runs one round-trip: "/* pgbouncer.database = '...' */ INSERT ..." (PgBouncer uses hint, forwards full query).
 func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (int, int, error) {
 	c, ok := conn.(*pgxpool.Conn)
 	if !ok {
@@ -55,19 +55,21 @@ func (b *Backend) InsertBatch(conn interface{}, rows []benchmarkgo.RowForDB) (in
 	}
 	ctx := context.Background()
 	if b.pgbouncerMode && len(rows) > 0 {
-		useDB1 := b.pgbouncerUseDB1.Load()
-		b.pgbouncerUseDB1.Store(!useDB1)
+		// Deterministic alternation by batch index so postgres1 and postgres2 get exactly the same number of batches (or off-by-one if total is odd).
+		batchIndex := b.pgbouncerBatchIndex.Add(1) - 1
+		useDB1 := (batchIndex % 2) == 0
 		db := pgbouncerDB1
 		if !useDB1 {
 			db = pgbouncerDB2
 		}
-		sql, args, err := BuildPgbouncerSetInsertStatement(rows, db)
+		sql, args, err := BuildPgbouncerHintInsertStatement(rows, db)
 		if err != nil {
 			return 0, 0, err
 		}
 		if _, err := c.Exec(ctx, sql, args...); err != nil {
 			return 0, 0, err
 		}
+		benchmarkgo.AddInsertToDB(db, int64(len(rows)))
 		return len(rows), 1, nil
 	}
 	n, err := InsertBatch(ctx, c, rows)
@@ -84,7 +86,7 @@ type Context struct {
 	PgbouncerEnabled  bool
 }
 
-// Setup creates insert pool and optionally a separate select pool. When PgbouncerEnabled, uses one pool (postgres1) and SET pgbouncer.database with INSERT back-to-back.
+// Setup creates insert pool and optionally a separate select pool. When PgbouncerEnabled, uses one pool (postgres1) and query hint with INSERT.
 func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchmarkgo.InsertBackend, error) {
 	if c.insertPool != nil {
 		log.Fatal("postgres Setup already called")
@@ -116,7 +118,7 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 	}
 	ctx := context.Background()
 	if c.PgbouncerEnabled {
-		log.Printf("Creating PostgreSQL connection pool at %s:%d (pgbouncer: postgres1, SET pgbouncer.database + INSERT flip-flop postgres1/postgres2, %d insert)",
+		log.Printf("Creating PostgreSQL connection pool at %s:%d (pgbouncer: postgres1, query hint + INSERT flip-flop postgres1/postgres2, %d insert)",
 			host, port, numWorkers)
 		insertPool, err := CreatePoolWithDB(ctx, host, port, numWorkers, pgbouncerDB1)
 		if err != nil {
@@ -140,7 +142,6 @@ func (c *Context) Setup(numWorkers, targetRPS int, queriesPerRecord int) (benchm
 		}
 		log.Printf("Starting insertions (target %d rows/sec) ...", targetRPS)
 		be := &Backend{pool: insertPool, pgbouncerMode: true}
-		be.pgbouncerUseDB1.Store(true)
 		return be, nil
 	}
 	log.Printf("Creating PostgreSQL connection pool(s) at %s:%d (%d insert connections)",

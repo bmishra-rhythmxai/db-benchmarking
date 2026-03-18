@@ -72,9 +72,9 @@ func BuildInsertStatement(rows []benchmarkgo.RowForDB, placeholderStart int) (sq
 	return sql, args, nil
 }
 
-// BuildPgbouncerSetInsertStatement returns one statement "SET pgbouncer.database = '...' (simple); INSERT ... (parameterized)".
-// SET is inlined; INSERT uses $1, $2, ... and args are the insert args only. db must be postgres1 or postgres2.
-func BuildPgbouncerSetInsertStatement(rows []benchmarkgo.RowForDB, db string) (sql string, args []interface{}, err error) {
+// BuildPgbouncerHintInsertStatement returns one statement "/* pgbouncer.database = '...' */ INSERT ... (parameterized)".
+// Hint is the first comment in the query; INSERT uses $1, $2, ... and args are the insert args only. db must be postgres1 or postgres2.
+func BuildPgbouncerHintInsertStatement(rows []benchmarkgo.RowForDB, db string) (sql string, args []interface{}, err error) {
 	if len(rows) == 0 {
 		return "", nil, nil
 	}
@@ -83,7 +83,7 @@ func BuildPgbouncerSetInsertStatement(rows []benchmarkgo.RowForDB, db string) (s
 		return "", nil, err
 	}
 	safeDB := strings.ReplaceAll(db, "'", "''")
-	combined := "SET pgbouncer.database = '" + safeDB + "'; " + insertSQL
+	combined := "/* pgbouncer.database = '" + safeDB + "' */ " + insertSQL
 	return combined, insertArgs, nil
 }
 

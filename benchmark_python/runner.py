@@ -109,7 +109,7 @@ async def run_load(
     insertion_queue: asyncio.Queue[Batch | None] = asyncio.Queue(maxsize=max(num_workers * 32, target_rps * 4))
     query_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=max(num_workers * 4, batch_size * num_workers * 4, target_rps * 4))
     inserted_lock = asyncio.Lock()
-    inserted_shared: list[float] = [0, 0, 0, 0.0, 0, 0, 0]
+    inserted_shared: list[float] = [0, 0, 0, 0.0, 0, 0, 0, 0, 0]  # [7]=postgres1, [8]=postgres2
     queries_lock = asyncio.Lock()
     queries_shared: list[float] = [0, 0.0, 0.0]
     progress_stop = asyncio.Event()
@@ -264,6 +264,8 @@ async def run_load(
     duplicates_final = int(inserted_shared[2])
     total_insert_latency_sec = inserted_shared[3]
     insert_statements_final = int(inserted_shared[4])
+    postgres1_final = int(inserted_shared[7]) if len(inserted_shared) > 7 else 0
+    postgres2_final = int(inserted_shared[8]) if len(inserted_shared) > 8 else 0
     queries_final = int(queries_shared[0])
     total_query_latency_sec = queries_shared[1]
     queries_failed_final = int(queries_shared[2])
@@ -278,6 +280,7 @@ async def run_load(
     )
     print(f"Database: {database}")
     print(f"Duration: {elapsed:.2f}s | Workers: {num_workers} | Rows inserted: {total_inserted_final} ({originals_final} original, {duplicates_final} duplicate) | Insert statements: {insert_statements_final}")
+    print(f"postgres1: {postgres1_final} | postgres2: {postgres2_final}")
     print(f"Actual insert rate: {actual_rps:.1f} rows/sec (target {target_rps})")
     if total_inserted_final > 0:
         print(f"Insert latency: avg {avg_insert_latency_ms:.2f} ms/row")
